@@ -15,6 +15,7 @@
 #include "exceptions/index_scan_completed_exception.h"
 #include "exceptions/file_not_found_exception.h"
 #include "exceptions/end_of_file_exception.h"
+#include "exceptions/file_exists_exception.h"
 
 
 //#define DEBUG
@@ -32,7 +33,87 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		const int attrByteOffset,
 		const Datatype attrType)
 {
+    //create the filename
+    std::ostringstream idxStr;
+    idxStr << relationName << '.' << attrByteOffset;
+    outIndexName = idxStr.str();
+	
+	//set values of the private variables
+	bufMgr = bufMgrIn;
+    attributeType = attrType;
+    this->attrByteOffset = attrByteOffset;
+	scanExecuting = false;
+	
+	if(attrType == INTEGER) {
+		leafOccupancy = INTARRAYLEAFSIZE;
+		nodeOccupancy = INTARRAYNONLEAFSIZE;
+	} else if(attrType == DOUBLE) {
+		leafOccupancy = DOUBLEARRAYLEAFSIZE;
+		nodeOccupancy = DOUBLEARRAYNONLEAFSIZE;
+	} else if(attrType == STRING) {
+		leafOccupancy = STRINGARRAYLEAFSIZE;
+		nodeOccupancy = STRINGARRAYNONLEAFSIZE;
+	} else {
+		std::cout << "ERROR: non valid data type passed to BTreeIndex constructor\n";
+	}
 
+    //check if that file exists
+	Page* metadataPage;
+	IndexMetaInfo* metadata;
+    try {
+		file = new BlobFile(outIndexName, false);
+	
+		//if the file exists, read the first page which contains metadata information
+		bufMgr->readPage(file, 1, metadataPage);
+		metadata = (IndexMetaInfo*) metadataPage;
+		
+		//set the metadata for this file. We aren't supposed to throw exceptions in the
+		//constructor so just overwrite whatever was there before
+		metadata->attrType = attrType;
+		metadata->attrByteOffset = attrByteOffset;
+		metadata->relationName = relationName;
+		
+		//set the root page for this index
+		//FIXME: this is probably wrong?
+		rootPageNum = metadata->rootPageNo;
+		return;
+	} catch(FileExistsException &e) {
+		
+	}
+	
+	//if the code reaches here then the file didnt exist so we must create one
+	file = new BlobFile(outIndexName, true);
+	
+	//make a metadata Page for this new index
+	PageId metadataPageId;
+	bufMgr->allocPage(file, metadataPageId, metadataPage);
+	bufMgr->readPage(file, metadataPageId, metadataPage);
+	metadata = (IndexMetaInfo*) metadataPage;
+	
+	//set variables in the metadata page
+	metadata->relationName = relationName;
+	metadata->attrType = attrType;
+	metadata->attrByteOffset = attrByteOffset;
+	
+	//create a new root page
+	Page* rootPage;
+	bufMgr->allocPage(file, rootPageNum /*private variable in this class. set here*/, rootPage);
+	bufMgr->readPage(file, rootPageNum, rootPage);
+	metadata->rootPageNo = rootPageNum;
+	
+	//the rootPage will become a leaf node depending on the attrType
+	switch(attrType) {
+		case INTEGER:
+			
+			break;
+		case DOUBLE:
+		
+			break;
+		case STRING:
+		
+			break;
+		default:
+	}
 }
 
 
