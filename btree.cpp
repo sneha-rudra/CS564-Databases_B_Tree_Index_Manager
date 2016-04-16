@@ -177,7 +177,20 @@ const void BTreeIndex::scanNext(RecordId& outRid)
 //
 const void BTreeIndex::endScan() 
 {
+   // Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
+   if(!scanExecuting){
+        throw ScanNotInitializedException;
+   }
+   else
+   {
+        scanExecuting = false;
+   }
 
+   // Unpinning all the pages that have been pinned for the purpose of scan
+   bufMgr->unPinPage(file, currentPageNum, false);
+   // TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
+   // TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
+    
 }
 
 }
