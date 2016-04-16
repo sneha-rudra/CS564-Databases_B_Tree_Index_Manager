@@ -7,7 +7,7 @@
 
 #include "btree.h"
 #include "filescan.h"
-#include "file_iterator.h"
+#include <file_iterator.h>
 #include "exceptions/bad_index_info_exception.h"
 #include "exceptions/bad_opcodes_exception.h"
 #include "exceptions/bad_scanrange_exception.h"
@@ -72,7 +72,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		//constructor so just overwrite whatever was there before
 		metadata->attrType = attrType;
 		metadata->attrByteOffset = attrByteOffset;
-		metadata->relationName = relationName;
+		strncpy(metadata->relationName, relationName.c_str(), 20);
 		
 		//set the root page for this index
 		//FIXME: this is probably wrong?
@@ -92,7 +92,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 	metadata = (IndexMetaInfo*) metadataPage;
 	
 	//set variables in the metadata page
-	metadata->relationName = relationName;
+	strncpy(metadata->relationName, relationName.c_str(), 20);
 	metadata->attrType = attrType;
 	metadata->attrByteOffset = attrByteOffset;
 	
@@ -113,7 +113,41 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		case STRING:
 		
 			break;
-		default:
+		default: ;
+	}
+
+	//insert records from this relation into the tree
+	//Create a file scanner for this relaion and buffer manager
+	FileScan* fileScan = new FileScan(relationName, bufMgr);
+	RecordId rid;
+	const char* recordPtr;
+	std::string record;
+	try {
+		//when we reach the end of this file, an exception will be thrown so we will exit then
+		while(true) {
+			fileScan->scanNext(rid);
+			record = fileScan->getRecord();
+			recordPtr = record.c_str();
+			std::string key;
+
+			switch(attrType) {
+				case INTEGER:
+					insertEntry((int*) (recordPtr + attrByteOffset), rid);
+					break;
+				case DOUBLE:
+					insertEntry((double*) (recordPtr + attrByteOffset), rid);
+					break;
+				case STRING: 
+					char keyBuf[10];
+					strncpy(keyBuf, (char*)(recordPtr + attrByteOffset), sizeof(keyBuf));
+					key = std::string(keyBuf);
+					insertEntry(&key, rid);
+					break;
+				default: ;
+			}
+		}
+	} catch (EndOfFileException &e) {
+	
 	}
 }
 
@@ -125,20 +159,21 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 BTreeIndex::~BTreeIndex()
 {
 	//TODO: Any other cleanup that may be necessary? Clearing up state variables. 
-	 
+
 	//TODO: Unpinning any B+ Tree pages that are pinned
-	for (badgerdb::FileIterator iter = file.begin(); iter != file.end(); ++iter) {
-		bufMgr->unPinPage( file, iter->page_number(), false );
-     }
-	
-		
+	/*
+	for(badgerdb::FileIterator iter = file.begin(); iter != file.end(); ++iter) {
+		bufMgr->unPinPage(file, iter->page_number(), false);
+	}
+	//*/
+
+
 	// Flushing the index file
 	bufMgr->flushFile(file);
-	
-	
+
+
 	// Deleting the file object. This automatically invokes the destructor of the File class and closes the index file.
-	delete file;	
-	
+	delete file;
 }
 
 // -----------------------------------------------------------------------------
@@ -177,20 +212,19 @@ const void BTreeIndex::scanNext(RecordId& outRid)
 //
 const void BTreeIndex::endScan() 
 {
-   // Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
-   if(!scanExecuting){
-        throw ScanNotInitializedException;
-   }
-   else
-   {
-        scanExecuting = false;
-   }
+	// Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
+	if(!scanExecuting){
+		throw ScanNotInitializedException();
+	}
+	else
+	{
+		scanExecuting = false;
+	}
 
-   // Unpinning all the pages that have been pinned for the purpose of scan
-   bufMgr->unPinPage(file, currentPageNum, false);
-   // TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
-   // TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
-    
+	// Unpinning all the pages that have been pinned for the purpose of scan
+	bufMgr->unPinPage(file, currentPageNum, false);
+	// TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
+	// TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
 }
 
 }
