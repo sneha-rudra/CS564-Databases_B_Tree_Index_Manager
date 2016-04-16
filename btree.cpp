@@ -7,6 +7,7 @@
 
 #include "btree.h"
 #include "filescan.h"
+#include "file_iterator.h"
 #include "exceptions/bad_index_info_exception.h"
 #include "exceptions/bad_opcodes_exception.h"
 #include "exceptions/bad_scanrange_exception.h"
@@ -42,6 +43,21 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 
 BTreeIndex::~BTreeIndex()
 {
+	//TODO: Any other cleanup that may be necessary? Clearing up state variables. 
+	 
+	//TODO: Unpinning any B+ Tree pages that are pinned
+	for (badgerdb::FileIterator iter = file.begin(); iter != file.end(); ++iter) {
+		bufMgr->unPinPage( file, iter->page_number(), false );
+     }
+	
+		
+	// Flushing the index file
+	bufMgr->flushFile(file);
+	
+	
+	// Deleting the file object. This automatically invokes the destructor of the File class and closes the index file.
+	delete file;	
+	
 }
 
 // -----------------------------------------------------------------------------
