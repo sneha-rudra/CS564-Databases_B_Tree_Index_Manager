@@ -7,8 +7,7 @@
 
 #include "btree.h"
 #include "filescan.h"
-#include "file_iterator.h"
-#include "exceptions/page_not_pinned_exception.h"
+#include <file_iterator.h>
 #include "exceptions/bad_index_info_exception.h"
 #include "exceptions/bad_opcodes_exception.h"
 #include "exceptions/bad_scanrange_exception.h"
@@ -18,6 +17,7 @@
 #include "exceptions/file_not_found_exception.h"
 #include "exceptions/end_of_file_exception.h"
 #include "exceptions/file_exists_exception.h"
+#include "exceptions/page_not_pinned_exception.h"
 
 
 //#define DEBUG
@@ -35,6 +35,9 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		const int attrByteOffset,
 		const Datatype attrType)
 {
+
+	//TODO: UNPIN UNNEEDED PAGES THROUGH OUT THIS FUNCTION
+
     //create the filename
     std::ostringstream idxStr;
     idxStr << relationName << '.' << attrByteOffset;
@@ -45,6 +48,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
     attributeType = attrType;
     this->attrByteOffset = attrByteOffset;
 	scanExecuting = false;
+	headerPageNum = 1;
 	
 	if(attrType == INTEGER) {
 		leafOccupancy = INTARRAYLEAFSIZE;
@@ -56,6 +60,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		leafOccupancy = STRINGARRAYLEAFSIZE;
 		nodeOccupancy = STRINGARRAYNONLEAFSIZE;
 	} else {
+		//TODO: throw exception here
 		std::cout << "ERROR: non valid data type passed to BTreeIndex constructor\n";
 	}
 
@@ -148,7 +153,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			}
 		}
 	} catch (EndOfFileException &e) {
-	
+		//end of the scna has been reached
 	}
 }
 
@@ -159,11 +164,10 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 
 BTreeIndex::~BTreeIndex()
 {
-
-    // Destructor. Method does not throw any exceptions as is indicated in the header file. All exceptions are caught in here itself.
+	// Destructor. Method does not throw any exceptions as is indicated in the header file. All exceptions are caught in here itself.
 
 	// TODO: Performing cleanup by clearing up state variables
-	
+
 	// Ending any initialized scan  and unpinning any B+ Tree pages that are pinned by invoking the endScan method.
 	// endScan method can throw the ScanNotInitializedException and PageNotPinned (thrown by unPinPage) which are caught in here
 	if (scanExecuting)
@@ -171,37 +175,38 @@ BTreeIndex::~BTreeIndex()
 		try {
 			endScan();
 		}
-		catch (ScanNotInitializedException e) { std::cout << "ScanNotInitializedException thrown in BtreeIndex destructor"; }
-		catch (PageNotPinnedException e) { std::cout << "PageNotPinned Exception thrown in BTreeIndex destructor"; }
-				
+		catch (const ScanNotInitializedException &e) { std::cout << "ScanNotInitializedException thrown in BtreeIndex destructor"; }
+		catch (const PageNotPinnedException &e) { std::cout << "PageNotPinned Exception thrown in BTreeIndex destructor"; }
+
 	}
-	
+
 	// Flushing the index file rom the buffer manager (by calling bufMgr->flushFile()) f
 	bufMgr->flushFile(file);
-	
+
 	// Deleting the file object instance. This automatically invokes the destructor of the File class and closes the index file.
 	delete file;
-	
-	
-	
+
+
+
 	// TODO: Remember to clean up any state variables. Maybe state variables that we set up in the constructor? 
 	// NOTE: The ~FileScan method (which also shuts down scan and unpins any pinned pages) sets the currentPage to null, clears the dirty bit and sets the file iterator 
 	// to point to the beginning of the file. Not sure if that's what they mean by perform any cleanup. This is not done in any other version though.
-	
-	
+
+
 	// NOTE: Not using 'PageNotPinnedException& e' based on syntax in main.cpp test4 of Project3. We can change this if that's more appropriate.
-	// NOTE: Printng out error messages for now. We ca remove them if required.
+		// after looking at some answers online (http://stackoverflow.com/questions/2522299/c-catch-blocks-catch-exception-by-value-or-reference),
+		// the main consensus is to catch by const reference
+	// NOTE: Printng out error messages for now. We can remove them if required.
 	// NOTE: catching the PageNotPinnedException here. We can catch it in endScan if that seems more appropriate.
-	
-	
+		// i would think it to be more appropriate to catch it there
+
 	// QUESTION: Can both the exception objects have the same name 'e'?
+		// ANSWER: yes
 	// QUESTION: One implementation flushFile method only if the file exists. The other one flushes it anyway. Not sure what we prefer?
-	
+		// likely we want to make sure it exists first before trying to flush it
+
 	// MINOR QUESTION: flushFile should have its input as a const File* but file is not of 'const' type does that matter? 
 	// Same question also for second argument of unPinPage
-	
-	
-
 }
 
 // -----------------------------------------------------------------------------
@@ -210,7 +215,35 @@ BTreeIndex::~BTreeIndex()
 
 const void BTreeIndex::insertEntry(const void *key, const RecordId rid) 
 {
-      
+	//read in the root page. 
+
+	//node = rootPage
+	
+	/*
+	PSEDUO CODE HERE
+	while(node.level = 0) {
+		for(i = 0; i < node.keyArray.length; i++) {
+			
+			if(key < node.keyArray[0]) node = pageNoArray[0]; break;
+			else if(key > node.keyArray[i] && i != node.keyArray.length - 1 && key < node.keyArray[i+1]) node = pageNoArray[i+1]; break;
+			else if(key > node.keyArray[i] && (i == node.keyArray.length -1 || node.keyArray[i+1] = INT_MAX)) node = pageNoArray[i+1]; break;
+		}	
+	}
+
+	//now we know we are at the level above the page where we need to insert this (key, rid) tuple
+	//once again find where we need to insert this tuple
+
+	//make sure to cast the leaf node to the correct type
+	for(i = 0; i < keyArray.length; i++) {
+		if(key < node.keyArray[0]) node = pageNoArray[0]; break;
+		else if(key > node.keyArray[i] && i != node.keyArray.length - 1 && key < node.keyArray[i+1]) node = pageNoArray[i+1]; break;
+		else if(key > node.keyArray[i] && (i == node.keyArray.length -1 || node.keyArray[i+1] = INT_MAX)) node = pageNoArray[i+1]; break;
+	}
+	
+	
+	
+	
+	*/
 }
 
 // -----------------------------------------------------------------------------
@@ -240,32 +273,19 @@ const void BTreeIndex::scanNext(RecordId& outRid)
 //
 const void BTreeIndex::endScan() 
 {
+	// Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
+	if(!scanExecuting){
+		throw ScanNotInitializedException();
+	}
+	else
+	{
+		scanExecuting = false;
+	}
 
-   // Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
-   if(!scanExecuting){
-        throw ScanNotInitializedException();
-   }
-   else
-   {    
-        // Resetting scan specific variables
-        scanExecuting = false;
-   }
-
-   // Unpinning all the pages that have been pinned for the purpose of scan
-   bufMgr->unPinPage(file, currentPageNum, false);
-   
-   // TODO: Should we catch PageNotPinned exception? If yes, then here or in the destructor? Catching it in the destructor for now.
-   // TODO: Header file says this method should reset scan specific variables. Which other variables might we need to reset here?   
-   // TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
-   // TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
-   // QUESTION: currentPageNum is not a 'const' pageId object. Does that matter?
-   // QUESTION: When FileScan (used to scan records in a file) ends the scan (in its destructor), it sets the currentPage to null, its dirty bit to null, sets the file iteratir to point to the
-   // beginning of the file and closes the file object. While shutting down a filtered scan of the index we dont need to do any of this?
-    
-   // QUESTION: Inside of ~FileScan (which also unpins any pinned pages), they first check if the currPage =! null and only then they call 
-   // the unpinPage method. Should we do that? 
-		
-
+	// Unpinning all the pages that have been pinned for the purpose of scan
+	bufMgr->unPinPage(file, currentPageNum, false);
+	// TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
+	// TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
 }
 
 }
