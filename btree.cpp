@@ -60,6 +60,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		leafOccupancy = STRINGARRAYLEAFSIZE;
 		nodeOccupancy = STRINGARRAYNONLEAFSIZE;
 	} else {
+		//TODO: throw exception here
 		std::cout << "ERROR: non valid data type passed to BTreeIndex constructor\n";
 	}
 
@@ -73,16 +74,14 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		bufMgr->readPage(file, 1, metadataPage);
 		metadata = (IndexMetaInfo*) metadataPage;
 		
-		//make sure the metadata matches whats passed in if the file already exists
-		if(	metadata->attrType != attrType ||
-			metadata->attrByteOffset != attrByteOffset ||
-			strcmp(metadata->relationName, relationName.c_str()) != 0 ) {
-
-			//if something doesnt match, then throw an exception
-			throw BadIndexInfoException("");
-		} 
+		//set the metadata for this file. We aren't supposed to throw exceptions in the
+		//constructor so just overwrite whatever was there before
+		metadata->attrType = attrType;
+		metadata->attrByteOffset = attrByteOffset;
+		strncpy(metadata->relationName, relationName.c_str(), 20);
 		
 		//set the root page for this index
+		//FIXME: this is probably wrong?
 		rootPageNum = metadata->rootPageNo;
 		return;
 	} catch(FileExistsException &e) {
@@ -109,94 +108,19 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 	bufMgr->readPage(file, rootPageNum, rootPage);
 	metadata->rootPageNo = rootPageNum;
 	
-	//the rootPage will become a non-leaf node
+	//the rootPage will become a leaf node depending on the attrType
 	switch(attrType) {
-		case Datatype::INTEGER: {
-			//initialize the rootNode with NULL key, pageNo pairs
-			NonLeafNodeInt* rootNode = (NonLeafNodeInt*) rootPage;
-			rootNode->level = 1;
-			for(int i = 0; i < nodeOccupancy; i++) rootNode->keyArray[i] = NULL;
-			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
-
-			//create an empty leaf page of the attribute type
-			Page* leafPage; PageId leafPageId;
-			bufMgr->allocPage(file, leafPageId, leafPage);
-			bufMgr->readPage(file, leafPageId, leafPage);
-			LeafNodeInt* leafNode = (LeafNodeInt*) leafPage;
-
-			//initialize the leaf page
-			leafNode->rightSibPageNo = NULL;
-			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
-			for(int i = 0; i < leafOccupancy; i++) {
-				RecordId rid;
-				rid.page_number = leafPageId;
-				rid.slot_number = NULL;
-				leafNode->ridArray[i] = rid;
-			}
-
-			rootNode->pageNoArray[0] = leafPageId;
+		case INTEGER:
+			
 			break;
-		}
-		case Datatype::DOUBLE: {
-			//initialize the rootNode with NULL key, pageNo pairs
-			NonLeafNodeDouble* rootNode = (NonLeafNodeDouble*) rootPage;
-			rootNode->level = 1;
-			for(int i = 0; i < nodeOccupancy; i++) rootNode->keyArray[i] = NULL;
-			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
-
-			//create an empty leaf page of the attribute type
-			Page* leafPage; PageId leafPageId;
-			bufMgr->allocPage(file, leafPageId, leafPage);
-			bufMgr->readPage(file, leafPageId, leafPage);
-			LeafNodeDouble* leafNode = (LeafNodeDouble*) leafPage;
-
-			//initialize the leaf page
-			leafNode->rightSibPageNo = NULL;
-			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
-			for(int i = 0; i < leafOccupancy; i++) {
-				RecordId rid;
-				rid.page_number = leafPageId;
-				rid.slot_number = NULL;
-				leafNode->ridArray[i] = rid;
-			}
-
-			rootNode->pageNoArray[0] = leafPageId;
+		case DOUBLE:
+		
 			break;
-		}
-		case Datatype::STRING: {
-			//initialize the rootNode with NULL key, pageNo pairs
-			NonLeafNodeString* rootNode = (NonLeafNodeString*) rootPage;
-			rootNode->level = 1;
-			for(int i = 0; i < nodeOccupancy; i++)
-				for(int j = 0; j < STRINGSIZE; j++)
-					rootNode->keyArray[i][j] = NULL;
-			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
-
-			//create an empty leaf page of the attribute type
-			Page* leafPage; PageId leafPageId;
-			bufMgr->allocPage(file, leafPageId, leafPage);
-			bufMgr->readPage(file, leafPageId, leafPage);
-			LeafNodeString* leafNode = (LeafNodeString*) leafPage;
-
-			//initialize the leaf page
-			leafNode->rightSibPageNo = NULL;
-			for(int i = 0; i < leafOccupancy; i++)
-				for(int j = 0; j < STRINGSIZE; j++)
-					leafNode->keyArray[i][j] = NULL;
-			for(int i = 0; i < leafOccupancy; i++) {
-				RecordId rid;
-				rid.page_number = leafPageId;
-				rid.slot_number = NULL;
-				leafNode->ridArray[i] = rid;
-			}
-
-			rootNode->pageNoArray[0] = leafPageId;
+		case STRING:
+		
 			break;
-		}
-		default: {};
+		default: ;
 	}
-
-	
 
 	//insert records from this relation into the tree
 	//Create a file scanner for this relaion and buffer manager
@@ -220,7 +144,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 					insertEntry((double*) (recordPtr + attrByteOffset), rid);
 					break;
 				case STRING: 
-					char keyBuf[STRINGSIZE];
+					char keyBuf[10];
 					strncpy(keyBuf, (char*)(recordPtr + attrByteOffset), sizeof(keyBuf));
 					key = std::string(keyBuf);
 					insertEntry(&key, rid);
@@ -229,7 +153,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			}
 		}
 	} catch (EndOfFileException &e) {
-		//end of the scan has been reached
+		//end of the scna has been reached
 	}
 }
 
@@ -252,12 +176,15 @@ BTreeIndex::~BTreeIndex()
 			endScan();
 		}
 		catch (const ScanNotInitializedException &e) { std::cout << "ScanNotInitializedException thrown in BtreeIndex destructor"; }
-		catch (const PageNotPinnedException &e) { std::cout << "PageNotPinned Exception thrown in BTreeIndex destructor"; }
+		
 
 	}
 
-	// Flushing the index file rom the buffer manager (by calling bufMgr->flushFile()) f
-	bufMgr->flushFile(file);
+	// Flushing the index file from the buffer manager if it exists
+	if(file){
+			bufMgr->flushFile(file);
+	}
+	
 
 	// Deleting the file object instance. This automatically invokes the destructor of the File class and closes the index file.
 	delete file;
@@ -267,22 +194,8 @@ BTreeIndex::~BTreeIndex()
 	// TODO: Remember to clean up any state variables. Maybe state variables that we set up in the constructor? 
 	// NOTE: The ~FileScan method (which also shuts down scan and unpins any pinned pages) sets the currentPage to null, clears the dirty bit and sets the file iterator 
 	// to point to the beginning of the file. Not sure if that's what they mean by perform any cleanup. This is not done in any other version though.
-
-
-	// NOTE: Not using 'PageNotPinnedException& e' based on syntax in main.cpp test4 of Project3. We can change this if that's more appropriate.
-		// after looking at some answers online (http://stackoverflow.com/questions/2522299/c-catch-blocks-catch-exception-by-value-or-reference),
-		// the main consensus is to catch by const reference
 	// NOTE: Printng out error messages for now. We can remove them if required.
-	// NOTE: catching the PageNotPinnedException here. We can catch it in endScan if that seems more appropriate.
-		// i would think it to be more appropriate to catch it there
 
-	// QUESTION: Can both the exception objects have the same name 'e'?
-		// ANSWER: yes
-	// QUESTION: One implementation flushFile method only if the file exists. The other one flushes it anyway. Not sure what we prefer?
-		// likely we want to make sure it exists first before trying to flush it
-
-	// MINOR QUESTION: flushFile should have its input as a const File* but file is not of 'const' type does that matter? 
-	// Same question also for second argument of unPinPage
 }
 
 // -----------------------------------------------------------------------------
@@ -292,47 +205,7 @@ BTreeIndex::~BTreeIndex()
 const void BTreeIndex::insertEntry(const void *key, const RecordId rid) 
 {
 	//read in the root page. 
-	Page* rootPage;
-	bufMgr->readPage(file, rootPageNum, rootPage);
 
-	//cast the rootPage to a non leaf node depending on type
-	switch(attributeType) {
-		case Datatype::INTEGER: {
-			NonLeafNodeInt* node = (NonLeafNodeInt*) rootPage;
-			int keyValue = *((int*) key);
-
-			while(node->level == 0) {
-				int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]);
-				for(int i = 0; i < length; i++) {
-					if(keyValue < node->keyArray[0]) {
-						Page* child; 
-						bufMgr->readPage(file, node->pageNoArray[0], child);
-						node = (NonLeafNodeInt*) child;
-						break;
-					} else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
-						Page* child;
-						bufMgr->readPage(file, node->pageNoArray[i+1], child);
-						node = (NonLeafNodeInt*) child;
-						break;
-					} else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
-						Page* child;
-						bufMgr->readPage(file, node->pageNoArray[i+1], child);
-						node = (NonLeafNodeInt*) child;
-						break;
-					}
-				}
-			}
-
-			break;
-		}
-		case Datatype::DOUBLE: {
-			break;
-		}
-		case Datatype::STRING: {
-			break;
-		}
-		default: {};
-	}
 	//node = rootPage
 	
 	/*
@@ -345,10 +218,8 @@ const void BTreeIndex::insertEntry(const void *key, const RecordId rid)
 			else if(key > node.keyArray[i] && (i == node.keyArray.length -1 || node.keyArray[i+1] = INT_MAX)) node = pageNoArray[i+1]; break;
 		}	
 	}
-
 	//now we know we are at the level above the page where we need to insert this (key, rid) tuple
 	//once again find where we need to insert this tuple
-
 	//make sure to cast the leaf node to the correct type
 	for(i = 0; i < keyArray.length; i++) {
 		if(key < node.keyArray[0]) node = pageNoArray[0]; break;
@@ -399,7 +270,13 @@ const void BTreeIndex::endScan()
 	}
 
 	// Unpinning all the pages that have been pinned for the purpose of scan
-	bufMgr->unPinPage(file, currentPageNum, false);
+	
+	try {
+			bufMgr->unPinPage(file, currentPageNum, false);
+	}
+	catch (const PageNotPinnedException &e) { std::cout << "PageNotPinned Exception thrown in endScan"; }
+	
+	
 	// TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
 	// TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
 }
