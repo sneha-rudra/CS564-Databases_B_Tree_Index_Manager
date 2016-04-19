@@ -60,7 +60,6 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		leafOccupancy = STRINGARRAYLEAFSIZE;
 		nodeOccupancy = STRINGARRAYNONLEAFSIZE;
 	} else {
-		//TODO: throw exception here
 		std::cout << "ERROR: non valid data type passed to BTreeIndex constructor\n";
 	}
 
@@ -74,14 +73,16 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		bufMgr->readPage(file, 1, metadataPage);
 		metadata = (IndexMetaInfo*) metadataPage;
 		
-		//set the metadata for this file. We aren't supposed to throw exceptions in the
-		//constructor so just overwrite whatever was there before
-		metadata->attrType = attrType;
-		metadata->attrByteOffset = attrByteOffset;
-		strncpy(metadata->relationName, relationName.c_str(), 20);
+		//make sure the metadata matches whats passed in if the file already exists
+		if(	metadata->attrType != attrType ||
+			metadata->attrByteOffset != attrByteOffset ||
+			strcmp(metadata->relationName, relationName.c_str()) != 0 ) {
+
+			//if something doesnt match, then throw an exception
+			throw BadIndexInfoException("");
+		} 
 		
 		//set the root page for this index
-		//FIXME: this is probably wrong?
 		rootPageNum = metadata->rootPageNo;
 		return;
 	} catch(FileExistsException &e) {
@@ -108,19 +109,94 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 	bufMgr->readPage(file, rootPageNum, rootPage);
 	metadata->rootPageNo = rootPageNum;
 	
-	//the rootPage will become a leaf node depending on the attrType
+	//the rootPage will become a non-leaf node
 	switch(attrType) {
-		case INTEGER:
-			
+		case Datatype::INTEGER: {
+			//initialize the rootNode with NULL key, pageNo pairs
+			NonLeafNodeInt* rootNode = (NonLeafNodeInt*) rootPage;
+			rootNode->level = 1;
+			for(int i = 0; i < nodeOccupancy; i++) rootNode->keyArray[i] = NULL;
+			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
+
+			//create an empty leaf page of the attribute type
+			Page* leafPage; PageId leafPageId;
+			bufMgr->allocPage(file, leafPageId, leafPage);
+			bufMgr->readPage(file, leafPageId, leafPage);
+			LeafNodeInt* leafNode = (LeafNodeInt*) leafPage;
+
+			//initialize the leaf page
+			leafNode->rightSibPageNo = NULL;
+			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
+			for(int i = 0; i < leafOccupancy; i++) {
+				RecordId rid;
+				rid.page_number = leafPageId;
+				rid.slot_number = NULL;
+				leafNode->ridArray[i] = rid;
+			}
+
+			rootNode->pageNoArray[0] = leafPageId;
 			break;
-		case DOUBLE:
-		
+		}
+		case Datatype::DOUBLE: {
+			//initialize the rootNode with NULL key, pageNo pairs
+			NonLeafNodeDouble* rootNode = (NonLeafNodeDouble*) rootPage;
+			rootNode->level = 1;
+			for(int i = 0; i < nodeOccupancy; i++) rootNode->keyArray[i] = NULL;
+			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
+
+			//create an empty leaf page of the attribute type
+			Page* leafPage; PageId leafPageId;
+			bufMgr->allocPage(file, leafPageId, leafPage);
+			bufMgr->readPage(file, leafPageId, leafPage);
+			LeafNodeDouble* leafNode = (LeafNodeDouble*) leafPage;
+
+			//initialize the leaf page
+			leafNode->rightSibPageNo = NULL;
+			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
+			for(int i = 0; i < leafOccupancy; i++) {
+				RecordId rid;
+				rid.page_number = leafPageId;
+				rid.slot_number = NULL;
+				leafNode->ridArray[i] = rid;
+			}
+
+			rootNode->pageNoArray[0] = leafPageId;
 			break;
-		case STRING:
-		
+		}
+		case Datatype::STRING: {
+			//initialize the rootNode with NULL key, pageNo pairs
+			NonLeafNodeString* rootNode = (NonLeafNodeString*) rootPage;
+			rootNode->level = 1;
+			for(int i = 0; i < nodeOccupancy; i++)
+				for(int j = 0; j < STRINGSIZE; j++)
+					rootNode->keyArray[i][j] = NULL;
+			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
+
+			//create an empty leaf page of the attribute type
+			Page* leafPage; PageId leafPageId;
+			bufMgr->allocPage(file, leafPageId, leafPage);
+			bufMgr->readPage(file, leafPageId, leafPage);
+			LeafNodeString* leafNode = (LeafNodeString*) leafPage;
+
+			//initialize the leaf page
+			leafNode->rightSibPageNo = NULL;
+			for(int i = 0; i < leafOccupancy; i++)
+				for(int j = 0; j < STRINGSIZE; j++)
+					leafNode->keyArray[i][j] = NULL;
+			for(int i = 0; i < leafOccupancy; i++) {
+				RecordId rid;
+				rid.page_number = leafPageId;
+				rid.slot_number = NULL;
+				leafNode->ridArray[i] = rid;
+			}
+
+			rootNode->pageNoArray[0] = leafPageId;
 			break;
-		default: ;
+		}
+		default: {};
 	}
+
+	
 
 	//insert records from this relation into the tree
 	//Create a file scanner for this relaion and buffer manager
@@ -144,7 +220,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 					insertEntry((double*) (recordPtr + attrByteOffset), rid);
 					break;
 				case STRING: 
-					char keyBuf[10];
+					char keyBuf[STRINGSIZE];
 					strncpy(keyBuf, (char*)(recordPtr + attrByteOffset), sizeof(keyBuf));
 					key = std::string(keyBuf);
 					insertEntry(&key, rid);
@@ -153,7 +229,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			}
 		}
 	} catch (EndOfFileException &e) {
-		//end of the scna has been reached
+		//end of the scan has been reached
 	}
 }
 
@@ -216,7 +292,47 @@ BTreeIndex::~BTreeIndex()
 const void BTreeIndex::insertEntry(const void *key, const RecordId rid) 
 {
 	//read in the root page. 
+	Page* rootPage;
+	bufMgr->readPage(file, rootPageNum, rootPage);
 
+	//cast the rootPage to a non leaf node depending on type
+	switch(attributeType) {
+		case Datatype::INTEGER: {
+			NonLeafNodeInt* node = (NonLeafNodeInt*) rootPage;
+			int keyValue = *((int*) key);
+
+			while(node->level == 0) {
+				int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]);
+				for(int i = 0; i < length; i++) {
+					if(keyValue < node->keyArray[0]) {
+						Page* child; 
+						bufMgr->readPage(file, node->pageNoArray[0], child);
+						node = (NonLeafNodeInt*) child;
+						break;
+					} else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
+						Page* child;
+						bufMgr->readPage(file, node->pageNoArray[i+1], child);
+						node = (NonLeafNodeInt*) child;
+						break;
+					} else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
+						Page* child;
+						bufMgr->readPage(file, node->pageNoArray[i+1], child);
+						node = (NonLeafNodeInt*) child;
+						break;
+					}
+				}
+			}
+
+			break;
+		}
+		case Datatype::DOUBLE: {
+			break;
+		}
+		case Datatype::STRING: {
+			break;
+		}
+		default: {};
+	}
 	//node = rootPage
 	
 	/*
