@@ -85,7 +85,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		//set the root page for this index
 		rootPageNum = metadata->rootPageNo;
 		return;
-	} catch(FileExistsException &e) {
+	} catch(const FileExistsException &e) {
 		
 	}
 	
@@ -129,7 +129,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
 			for(int i = 0; i < leafOccupancy; i++) {
 				RecordId rid;
-				rid.page_number = leafPageId;
+				rid.page_number = NULL;
 				rid.slot_number = NULL;
 				leafNode->ridArray[i] = rid;
 			}
@@ -155,7 +155,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
 			for(int i = 0; i < leafOccupancy; i++) {
 				RecordId rid;
-				rid.page_number = leafPageId;
+				rid.page_number = NULL;
 				rid.slot_number = NULL;
 				leafNode->ridArray[i] = rid;
 			}
@@ -185,7 +185,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 					leafNode->keyArray[i][j] = NULL;
 			for(int i = 0; i < leafOccupancy; i++) {
 				RecordId rid;
-				rid.page_number = leafPageId;
+				rid.page_number = NULL;
 				rid.slot_number = NULL;
 				leafNode->ridArray[i] = rid;
 			}
@@ -282,29 +282,74 @@ const void BTreeIndex::insertEntry(const void *key, const RecordId rid)
 	//cast the rootPage to a non leaf node depending on type
 	switch(attributeType) {
 		case Datatype::INTEGER: {
+			//iteratively search from the root
 			NonLeafNodeInt* node = (NonLeafNodeInt*) rootPage;
 			int keyValue = *((int*) key);
+			int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]);
 
+			//keep traversing until level == 1. then we are one level above the leaves
 			while(node->level == 0) {
-				int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]);
 				for(int i = 0; i < length; i++) {
+					//if it's less than the first then take the value at 0
 					if(keyValue < node->keyArray[0]) {
 						Page* child; 
 						bufMgr->readPage(file, node->pageNoArray[0], child);
 						node = (NonLeafNodeInt*) child;
 						break;
-					} else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
+					}
+					//if its between the current position and the next position and we are not at the end
+					else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
 						Page* child;
 						bufMgr->readPage(file, node->pageNoArray[i+1], child);
 						node = (NonLeafNodeInt*) child;
 						break;
-					} else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
+					}
+					//if its greater than the last value
+					else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
 						Page* child;
 						bufMgr->readPage(file, node->pageNoArray[i+1], child);
 						node = (NonLeafNodeInt*) child;
 						break;
 					}
 				}
+			}
+
+			//at this point we know node is the parent of the page the rid is on so we need to search once more
+			//find which page the data is on
+			Page* leafPage;
+			LeafNodeInt* leaf;
+			
+			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN
+
+			if(node->keyArray[0] == NULL) {
+				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
+				leaf = (LeafNodeInt*) leafPage;
+			} else {
+				for(int i = 0; i < length; i++) {
+					if(keyValue < node->keyArray[0]) {
+						bufMgr->readPage(file, node->pageNoArray[0], leafPage);
+						leaf = (LeafNodeInt*) leafPage;
+						break;
+					} else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
+						bufMgr->readPage(file, node->pageNoArray[i+1], leafPage);
+						leaf = (LeafNodeInt*) leafPage;
+						break;
+					} else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
+						bufMgr->readPage(file, node->pageNoArray[i+1], leafPage);
+						leaf = (LeafNodeInt*) leafPage;
+						break;
+					}
+				}
+			}
+
+			//leaf now points to the page where the record should be inserted
+			//loop through the keys and find where this key goes
+			if(leaf->keyArray[INTARRAYLEAFSIZE - 1] != NULL) {
+				//just insert the record
+			}
+			else {
+				//split the leaf page
+				//then insert the 
 			}
 
 			break;
@@ -355,6 +400,37 @@ const void BTreeIndex::startScan(const void* lowValParm,
 				   const void* highValParm,
 				   const Operator highOpParm)
 {
+	//set the local values for this class to the values passed in
+	//switch on attrType and cast the void* to appropriate type
+
+	//find the leaf page where the lowValParm would fit in as a key
+	
+	//read the rootPage into the bufMgr
+	//cast that page to a non-leaf node
+
+	// Where to unpin
+
+	//while(node->level == 0) {
+	//	loop through the keys in that level to find where lowValParm would go
+	//	set node = child pointed to by page (make sure to read the page into memory first)
+	//	break from the for loop when you find the correct page
+	//}
+
+	//node now equals the level above the correct leaf
+	//create a pointer to a leaf page called leaf
+
+	//once again loop through the node (nonLeafNode) 
+	//	find where the lowValParm would go and read that page into the bufMgr
+	//
+	//set leaf to leafNode* cast of the page pointer
+
+	//loop through the keys on the leaf page
+	//(unpin page before throw exception)
+	//if the first key you find that is bigger than the lower bound and upper bound, then exception
+	//or if the lower bound is larger than the last key, then exception
+
+	//
+
 
 }
 
