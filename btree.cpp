@@ -400,6 +400,86 @@ const void BTreeIndex::startScan(const void* lowValParm,
 				   const void* highValParm,
 				   const Operator highOpParm)
 {
+	// This method begins a filtered scan of the index 
+	
+	// Ending another scan that may be already executing. EndScan can throw a ScanNotInitializedException   
+	if(scanExecuting){
+		try {
+			endScan();
+		} catch(const ScanNotInitializedException &e) { 
+			std::cout << "ScanNotInitializedException thrown in BtreeIndex startScan\n"; 
+		}
+	}
+	
+	// Setting up operator member variables in BtreeIndex Class
+	lowOp = lowOpParm;
+	highOp = highOpParm;
+	
+
+	// lowOp must be either GT/GTE and highOp must be LT/LTE. BadOpCodesException is thrown if that is not the case.
+	  if(     !((lowOp == GT)||(lowOp == GTE))  ||     !((highOp == LT)||(highOp == LTE))     ){
+		throw BadOpcodesException();  
+	}
+	
+       // Setting up other scan related member variables in BTreeIndex Class
+	nextEntry = 0;
+	currentPageNum = rootPageNum; // Starting at the root
+
+	switch(attributeType){
+
+		case INTEGER:
+			//Dereferencing by casting void* to int*
+			lowValInt =  *((int*)lowValParm); 
+			highValInt = *((int*)highValParm);
+			// Method throws exception if lower bound > upper bound
+			if (lowValInt > highValInt){
+				throw BadScanrangeException();
+			}
+			// Starting scan since the range and operators are valid
+			scanExecuting = true;
+
+			break;
+
+		case DOUBLE:
+			//Dereferencing by casting void* to double* 
+			lowValDouble  = *((double*)lowValParm); 
+			highValDouble = *((double*)highValParm);
+			// Method throws exception if lower bound > upper bound
+			if (lowValDouble > highValDouble){
+				throw BadScanrangeException();
+			}
+			// Starting scan since the range and operators are valid
+			scanExecuting = true;
+
+			break;
+
+		case STRING: 
+			//Initializing to empty string
+			//Dereferencing by casting void* to char*
+			//Using first 10 chars of the char array for string comparison
+			lowValString.clear(); 
+			for (int i = 0; i < 10; i++){
+				lowValString += *((char*)lowValParm + i); 
+			}
+			highValString.clear(); 
+			for (int i = 0; i < 10; i++){
+				highValString += *((char*)highValParm + i);
+			}
+			// Method throws exception if lower bound > upper bound
+			if (lowValString > highValString){
+				throw BadScanrangeException();
+			}
+			// Starting scan since the range and operators are valid
+			scanExecuting = true;
+
+			break;
+
+		default: break;
+	}	
+	
+	
+	// STILL WORKING ON THIS ....////////////////////////////////////
+	
 	//set the local values for this class to the values passed in
 	//switch on attrType and cast the void* to appropriate type
 
