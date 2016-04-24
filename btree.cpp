@@ -411,36 +411,136 @@ const void BTreeIndex::startScan(const void* lowValParm,
 		}
 	}
 	
+	// TODO: Perhaps clear these variables in the endScan or the destructor or both
 	// Setting up operator member variables in BtreeIndex Class
 	lowOp = lowOpParm;
 	highOp = highOpParm;
 	
 
 	// lowOp must be either GT/GTE and highOp must be LT/LTE. BadOpCodesException is thrown if that is not the case.
-	  if(     !((lowOp == GT)||(lowOp == GTE))  ||     !((highOp == LT)||(highOp == LTE))     ){
+    	if(     !((lowOp == GT)||(lowOp == GTE))  ||     !((highOp == LT)||(highOp == LTE))     ){
 		throw BadOpcodesException();  
 	}
 	
-       // Setting up other scan related member variables in BTreeIndex Class
+	// TODO: Perhaps clear these variables in the endScan or the destructor or both
+	// Setting up other scan related member variables in BTreeIndex Class
 	nextEntry = 0;
 	currentPageNum = rootPageNum; // Starting at the root
+	Page* rootPage; // Reading in rootPage into buffer
+	bufMgr->readPage(file, rootPageNum, rootPage);
 
 	switch(attributeType){
 
-		case INTEGER:
+		case Datatype::INTEGER:
+
+			// TODO: Perhaps clear these variables in the endScan or the destructor or both
 			//Dereferencing by casting void* to int*
 			lowValInt =  *((int*)lowValParm); 
 			highValInt = *((int*)highValParm);
+
 			// Method throws exception if lower bound > upper bound
 			if (lowValInt > highValInt){
 				throw BadScanrangeException();
 			}
+
 			// Starting scan since the range and operators are valid
 			scanExecuting = true;
 
+			// Finding the leaf page with the first RecordID satisfying scan parameters
+
+			// Iterative search starting at the root 
+			NonLeafNodeInt* node = (NonLeafNodeInt*)rootPage;
+			int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]); // # of keys in the node
+
+			// Traversing until we reach one level above the leaves (level=1)
+			while (node->level == 0){
+
+				// TODO/QUESTION: Can we just move this first condition lowVal < keyArray[0] outside the for loop because it doesnt depend on 'i' and use continue to check if we are one level above the leaf? We can change back if you want
+				// Picking the correct child node by comparing lowVal to each key in this node
+				// If lowVal < first key, then the page number at 0 is picked as child page
+				if (lowValInt <= node->keyArray[0]) { // NOTE: Changed to <=
+					Page* child;
+					PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+					currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+					bufMgr->readPage(file, node->pageNoArray[0], child);
+					node = (NonLeafNodeInt*)child;
+					bufMgr->unPinPage( file, lastPageNum, false ); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+					continue; 	
+				}
+				// If lowVal !< first key, we check other keys in this node
+				for (int i = 0; i < length; i++) {
+					//If its between the current position and the next position and we are not at the end
+					if (lowValInt > node->keyArray[i] && i != length && lowValInt <= node->keyArray[i + 1]) { // NOTE: Changed to <=
+						Page* child;
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i+1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
+						node = (NonLeafNodeInt*)child;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+					//If its greater than the last value
+					else if (lowValInt > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE/ is it equal to the number of keys actually present?
+						Page* child;
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
+						node = (NonLeafNodeInt*)child;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+				}
+
+			}
+
+			//At this point we know node is the parent of the page the rid is on so we need to search once more
+			//to find which page with the first RecordID satisfying scan parameters
+			Page* leafPage;
+			LeafNodeInt* leaf;
+
+			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN // Please check note below
+			if (node->keyArray[0] == NULL) {
+				PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+				currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
+				leaf = (LeafNodeInt*)leafPage;
+				bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+			}
+			else {
+				for (int i = 0; i < length; i++) {
+					if (lowValInt <= node->keyArray[0]) { //NOTE: Changed to <=
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[0], leafPage);
+						leaf = (LeafNodeInt*)leafPage;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+					else if (lowValInt > node->keyArray[i] && i != length && lowValInt <= node->keyArray[i + 1]) { //NOTE: Changed to <=
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i+1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
+						leaf = (LeafNodeInt*)leafPage;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+					else if (lowValInt > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE or is it equal to the number of keys actually present?
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i+1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
+						leaf = (LeafNodeInt*)leafPage;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+				}
+			}
+
+			//Leaf now points to the page where the first recordID may be found
+			
+			//////// FILL IN THE BLANKS ///////////////
 			break;
 
-		case DOUBLE:
+		case Datatype::DOUBLE:
 			//Dereferencing by casting void* to double* 
 			lowValDouble  = *((double*)lowValParm); 
 			highValDouble = *((double*)highValParm);
@@ -450,10 +550,12 @@ const void BTreeIndex::startScan(const void* lowValParm,
 			}
 			// Starting scan since the range and operators are valid
 			scanExecuting = true;
-
+			// Finding the leaf page with the first RecordID satisfying scan parameters
+			
+			//////// FILL IN THE BLANKS ///////////////
 			break;
 
-		case STRING: 
+		case Datatype::STRING: 
 			//Initializing to empty string
 			//Dereferencing by casting void* to char*
 			//Using first 10 chars of the char array for string comparison
@@ -471,46 +573,14 @@ const void BTreeIndex::startScan(const void* lowValParm,
 			}
 			// Starting scan since the range and operators are valid
 			scanExecuting = true;
-
+			// Finding the leaf page with the first RecordID satisfying scan parameters
+			
+			//////// FILL IN THE BLANKS ///////////////
 			break;
 
 		default: break;
 	}	
 	
-	
-	// STILL WORKING ON THIS ....////////////////////////////////////
-	
-	//set the local values for this class to the values passed in
-	//switch on attrType and cast the void* to appropriate type
-
-	//find the leaf page where the lowValParm would fit in as a key
-	
-	//read the rootPage into the bufMgr
-	//cast that page to a non-leaf node
-
-	// Where to unpin
-
-	//while(node->level == 0) {
-	//	loop through the keys in that level to find where lowValParm would go
-	//	set node = child pointed to by page (make sure to read the page into memory first)
-	//	break from the for loop when you find the correct page
-	//}
-
-	//node now equals the level above the correct leaf
-	//create a pointer to a leaf page called leaf
-
-	//once again loop through the node (nonLeafNode) 
-	//	find where the lowValParm would go and read that page into the bufMgr
-	//
-	//set leaf to leafNode* cast of the page pointer
-
-	//loop through the keys on the leaf page
-	//(unpin page before throw exception)
-	//if the first key you find that is bigger than the lower bound and upper bound, then exception
-	//or if the lower bound is larger than the last key, then exception
-
-	//
-
 
 }
 
