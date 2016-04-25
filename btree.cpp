@@ -540,6 +540,7 @@ const void BTreeIndex::startScan(const void* lowValParm,
 			//////// FILL IN THE BLANKS ///////////////
 			break;
 
+	
 		case Datatype::DOUBLE:
 			//Dereferencing by casting void* to double* 
 			lowValDouble  = *((double*)lowValParm); 
@@ -552,6 +553,96 @@ const void BTreeIndex::startScan(const void* lowValParm,
 			scanExecuting = true;
 			// Finding the leaf page with the first RecordID satisfying scan parameters
 			
+			// Iterative search starting at the root 
+			NonLeafNodeDouble* node = (NonLeafNodeDouble*)rootPage;
+			int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]); // # of keys in the node
+
+			// Traversing until we reach one level above the leaves (level=1)
+			while (node->level == 0){
+
+				// TODO/QUESTION: Can we just move this first condition lowVal < keyArray[0] outside the for loop because it doesnt depend on 'i' and use continue to check if we are one level above the leaf? We can change back if you want
+				// Picking the correct child node by comparing lowVal to each key in this node
+				// If lowVal < first key, then the page number at 0 is picked as child page
+				if (lowValDouble <= node->keyArray[0]) { // NOTE: Changed to <=
+					Page* child;
+					PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+					currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+					bufMgr->readPage(file, node->pageNoArray[0], child);
+					node = (NonLeafNodeDouble*)child;
+					bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+					continue;
+				}
+				// If lowVal !< first key, we check other keys in this node
+				for (int i = 0; i < length; i++) {
+					//If its between the current position and the next position and we are not at the end
+					if (lowValDouble > node->keyArray[i] && i != length && lowValDouble <= node->keyArray[i + 1]) { // NOTE: Changed to <=
+						Page* child;
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
+						node = (NonLeafNodeDouble*)child;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+					//If its greater than the last value
+					else if (lowValDouble > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE/ is it equal to the number of keys actually present?
+						Page* child;
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
+						node = (NonLeafNodeDouble*)child;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+				}
+
+			}
+
+			//At this point we know node is the parent of the page the rid is on so we need to search once more
+			//to find which page with the first RecordID satisfying scan parameters
+			Page* leafPage;
+			LeafNodeDouble* leaf;
+
+			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN // Please check note below
+			if (node->keyArray[0] == NULL) { //QUESTION: Is it really possible that a node has a leaf but no key?
+				PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+				currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
+				leaf = (LeafNodeDouble *)leafPage;
+				bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+			}
+			else {
+				for (int i = 0; i < length; i++) {
+					if (lowValDouble <= node->keyArray[0]) { //NOTE: Changed to <=
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[0], leafPage);
+						leaf = (LeafNodeDouble*)leafPage;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+					else if (lowValDouble > node->keyArray[i] && i != length && lowValDouble <= node->keyArray[i + 1]) { //NOTE: Changed to <=
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
+						leaf = (LeafNodeDouble*)leafPage;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+					else if (lowValDouble > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE or is it equal to the number of keys actually present?
+						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
+						leaf = (LeafNodeDouble*)leafPage;
+						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
+						break;
+					}
+				}
+			}
+
+			//Leaf now points to the page where the first recordID may be found
+			//Looping through the keys in the current leaf
+			nextEntry = 0;
 			//////// FILL IN THE BLANKS ///////////////
 			break;
 
