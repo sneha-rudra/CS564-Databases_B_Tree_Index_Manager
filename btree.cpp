@@ -423,8 +423,8 @@ const void BTreeIndex::startScan(const void* lowValParm,
 	}
 	
 	// TODO: Perhaps clear these variables in the endScan or the destructor or both
-	// Setting up other scan related member variables in BTreeIndex Class
-	nextEntry = 0;
+    	// Setting up other scan related member variables in BTreeIndex Class
+	nextEntry = 0; 
 	currentPageNum = rootPageNum; // Starting at the root
 	Page* rootPage; // Reading in rootPage into buffer
 	bufMgr->readPage(file, rootPageNum, rootPage);
@@ -499,7 +499,7 @@ const void BTreeIndex::startScan(const void* lowValParm,
 			LeafNodeInt* leaf;
 
 			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN // Please check note below
-			if (node->keyArray[0] == NULL) {
+			if (node->keyArray[0] == NULL) { //QUESTION: Is it really possible that a node has a leaf but no key?
 				PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
 				currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
 				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
@@ -535,12 +535,79 @@ const void BTreeIndex::startScan(const void* lowValParm,
 				}
 			}
 
-			//Leaf now points to the page where the first recordID may be found
 			
+
+			//Leaf now points to the page where the first recordID may be found
+			//Looping through the keys in the current leaf
+			nextEntry = 0; 
+			while (leaf->keyArray[nextEntry] < lowValInt && nextEntry < INTARRAYLEAFSIZE) //TODO/QUESTION: Dont know if we want to check the Rid.PageNumber=0?
+			{
+					nextEntry++;
+			}
+			// At this point either (1) we found a key with value >= lowVal in the current leaf OR (2) no key in this leaf has value >= lowVal 
+
+			// (1) Either no key in this leaf has value >= lowVal 
+			if (nextEntry >= INTARRAYLEAFSIZE){
+
+				// If a sibling leaf page exists, we read in the sibling leaf 
+				if(leaf->rightSibPageNo != NULL){
+					
+					PageId lastPageNum = currentPageNum;
+					currentPageNum = leaf->rightSibPageNo;
+					bufMgr->readPage(file, currentPageNum, leafPage); 
+					leaf = (LeafNodeInt*)leafPage;
+					bufMgr->unPinPage(file, lastPageNum, false);
+					nextEntry = 0; // set to first entry of sibling leaf
+
+				}
+                	// Else we are the last page, in which case end the scan and throw exception
+				else {
+					
+					//No more leaf pages
+					try {
+						endScan();
+					}
+					catch (const ScanNotInitializedException &e) { //TODO/QUESTION: If we dont to catch the exception here we can get rid of this //TODO/QUESTION: As in the example, instead of calling endScan we can unPin and set scanExec to false, if you want
+						std::cout << "ScanNotInitializedException thrown in BtreeIndex startScan \n";
+					}
+
+					throw NoSuchKeyFoundException(); 
+				}
+
+			}
+			// (2) Or we found a key with value >= lowVal in the current leaf
+			else{
+					// This key has a value = lowVal but low operator is a 'strictly greator than' 
+					if ( leaf->keyArray[nextEntry] == lowValInt && lowOp == GT)
+					{
+							// Calling scanNext to get a key with value > lowVal
+							try
+							{
+								scanNext(leaf->ridArray[nextEntry]);
+							}
+							catch (const IndexScanCompletedException &e) 
+							{
+								// No more records satifying the scan criteria so end the scan
+								try {
+									endScan(); //TODO/QUESTION: As in the example, instead of calling endScan we can unPin and set scanExec to false, if you want
+								}
+								catch (const ScanNotInitializedException &e) { //TODO/QUESTION: If we dont to catch the exception here we can get rid of this // QUESTION: ScanNext itself can also throw a scanNotIniExc not usre if want to catch that
+									std::cout << "ScanNotInitializedException thrown in BtreeIndex startScan \n";
+								}
+								throw NoSuchKeyFoundException();
+							}
+							
+					}
+			}
+			
+
+			// StartScan goal from header: the leaf page that contains the first RecordID that satisfies the scan parameters. 
+			// TODO: Check how exactly would we get to the last leaf if we didnt have a while loop here and just had an if? 
+				
 			//////// FILL IN THE BLANKS ///////////////
 			break;
 
-	
+
 		case Datatype::DOUBLE:
 			//Dereferencing by casting void* to double* 
 			lowValDouble  = *((double*)lowValParm); 
@@ -671,6 +738,7 @@ const void BTreeIndex::startScan(const void* lowValParm,
 
 		default: break;
 	}	
+		
 	
 
 }
