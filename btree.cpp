@@ -270,6 +270,114 @@ BTreeIndex::~BTreeIndex()
 }
 
 // -----------------------------------------------------------------------------
+// BTreeIndex::getLeafBasedOnKey
+// -----------------------------------------------------------------------------
+const void BTreeIndex::traverseAndInsert(Page* page, int pageLevel, bool isRoot, const void* keyPtr, const RecordId rid, bool &restructured, Page* &newPage) {
+	switch(attrType) {
+		case INTEGER: {
+			int key = *((int*) keyPtr);
+			NonLeafNodeInt* nodeInt = (NonLeafNodeInt*) page;
+			if(isRoot && nodeInt->keyArray[0] == NULL) {
+				//set the first key in the root 
+				nodeInt->keyArray[0] = key;
+
+				//create a right page (left page already exists from the constructor)
+				Page* leafPage; PageId leafPageId;
+				bufMgr->allocPage(file, leafPageId, leafPage);
+				nodeInt->pageNoArray[1] = leafPageId;
+			}
+
+			Page* addedPage;
+			bool childRestructured;
+			if(pageLevel == 0) {
+				//find where the key would go
+				int index = findIndexIntoPageNoArray(page, keyPtr);
+
+				//read in that page
+				Page* child;
+				bufMgr->readPage(file, nodeInt->pageNoArray[index], child);
+
+				//recurse into that child
+				traverseAndInsert(child, ((NonLeafPageInt*) child)->level, false, keyPtr, rid, childRestructured, addedPage);
+			}
+			else {
+				//we are the parent of the leaf
+				//find what page the leaf is on
+				int index = findIndexIntoPageNoArray(page, keyPtr);
+
+				//read in the leaf page and cast
+				Page* leafPage;
+				bufMgr->readPage(file, nodeInt->pageNoArray[index], leaf);
+				LeafNodeInt* leaf = (LeafNodeInt*) page;
+
+				//find the index into the key array where the rid would go
+				int index = findIndexIntoKeyArray(page, keyPtr);
+			}
+			break;
+		}
+		case DOUBLE: {
+			break;
+		}
+		case STRING: {
+			break;
+		}
+		default:
+			break;
+
+	}
+}
+
+//assumes leaf page
+int BTreeIndex::findIndexIntoKeyArray(Page* page, const void* keyPtr) {
+	switch(attrType) {
+		case INTEGER: {
+			int key = *((int*) keyPtr);
+			LeafNodeInt* leaf = (LeafNodeInt*) page;
+			for(int i = 0; i < leafOccupancy; i++) {
+				if(key < leaf->keyArray[0]) return 0;
+				else if(key > leaf->keyArray[i] && i != leafOccupancy - 1 && key < leaf->keyArray[i + 1]) return i + 1;
+				else if(key > leaf->keyArray[i] && (i == leafOccupancy - 1 || leaf->keyArray[i + 1] == NULL)) return i + 1;
+			}
+			break;
+		}
+		case DOUBLE: {
+		
+			break;
+		}
+		case STRING: {
+		
+			break;
+		}
+		default: {break;}
+	}
+}
+
+//assumes page is non-leaf
+int BTreeIndex::findIndexIntoPageNoArray(Page* page, const void* keyPtr) {
+	switch(attrType) {
+		case INTEGER: {
+			int key = *((int*) keyPtr);
+			NonLeafNodeInt* nodeInt = (NonLeafNodeInt*) page;
+			for(int i = 0; i < nodeOccupancy; i++) {
+				if(key < nodeInt->keyArray[0]) return 0;
+				else if(key > nodeInt->keyArray[i] && i != nodeOccupancy - 1 && key < nodeInt->keyArray[i + 1]) return i + 1;
+				else if(key > nodeInt->keyArray[i] && (i == nodeOccupancy - 1 || nodeInt->keyArray[i + 1] == NULL)) return i + 1;
+			}
+			break;
+		}
+		case DOUBLE: {
+		
+			break;
+		}
+		case STRING: {
+			
+			break;
+		}
+		default: {break;}
+	}
+}
+
+// -----------------------------------------------------------------------------
 // BTreeIndex::insertEntry
 // -----------------------------------------------------------------------------
 
@@ -450,7 +558,8 @@ const void BTreeIndex::startScan(const void* lowValParm,
 
 			// Iterative search starting at the root 
 			NonLeafNodeInt* node = (NonLeafNodeInt*)rootPage;
-			int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]); // # of keys in the node
+			//length is just nodeOccupancy
+			//int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]); // # of keys in the node
 
 			// Traversing until we reach one level above the leaves (level=1)
 			while (node->level == 0){
