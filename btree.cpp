@@ -5,6 +5,7 @@
  * Copyright (c) 2012 Database Group, Computer Sciences Department, University of Wisconsin-Madison.
  */
 
+#include <limits.h>
 #include "btree.h"
 #include "filescan.h"
 #include <file_iterator.h>
@@ -28,13 +29,7 @@ namespace badgerdb
 // -----------------------------------------------------------------------------
 // BTreeIndex::BTreeIndex -- Constructor
 // -----------------------------------------------------------------------------
-
-BTreeIndex::BTreeIndex(const std::string & relationName,
-		std::string & outIndexName,
-		BufMgr *bufMgrIn,
-		const int attrByteOffset,
-		const Datatype attrType)
-{
+BTreeIndex::BTreeIndex(const std::string & relationName, std::string & outIndexName, BufMgr *bufMgrIn, const int attrByteOffset, const Datatype attrType) {
 
 	//TODO: UNPIN UNNEEDED PAGES THROUGH OUT THIS FUNCTION
 
@@ -49,7 +44,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
     this->attrByteOffset = attrByteOffset;
 	scanExecuting = false;
 	headerPageNum = 1;
-	
+
 	if(attrType == INTEGER) {
 		leafOccupancy = INTARRAYLEAFSIZE;
 		nodeOccupancy = INTARRAYNONLEAFSIZE;
@@ -60,41 +55,61 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 		leafOccupancy = STRINGARRAYLEAFSIZE;
 		nodeOccupancy = STRINGARRAYNONLEAFSIZE;
 	} else {
-		std::cout << "ERROR: non valid data type passed to BTreeIndex constructor\n";
+		std::cout << "ERROR: non valid data type passed to BTreeIndex constructor" << std::endl;
+		return;
 	}
+
+	//std::cout << "nodeOccupancy = " << nodeOccupancy << std::endl;
+	//std::cout << "leafOccupancy = " << leafOccupancy << std::endl;
+
 
     //check if that file exists
+	Page* rootPage;
 	Page* metadataPage;
 	IndexMetaInfo* metadata;
+	BlobFile* bFile;
     try {
-		file = new BlobFile(outIndexName, false);
-	
+		bFile = new BlobFile(outIndexName, true);
+	} catch(const FileExistsException &e) {
+
+		//std::cout << "File already existed" << std::endl;
+
+		bFile = new BlobFile(outIndexName, false);
+		file = (File*) bFile;
+
 		//if the file exists, read the first page which contains metadata information
-		bufMgr->readPage(file, 1, metadataPage);
+		bufMgr->readPage(file, headerPageNum, metadataPage);
 		metadata = (IndexMetaInfo*) metadataPage;
-		
+
 		//make sure the metadata matches whats passed in if the file already exists
-		if(	metadata->attrType != attrType ||
+		if(metadata->attrType != attrType ||
 			metadata->attrByteOffset != attrByteOffset ||
-			strcmp(metadata->relationName, relationName.c_str()) != 0 ) {
+			strcmp(metadata->relationName, relationName.c_str()) != 0) {
 
 			//if something doesnt match, then throw an exception
-			throw BadIndexInfoException("");
-		} 
-		
+			throw BadIndexInfoException("Info passed into constructor doesn't match meta info page");
+		}
+
+		//we dont need the header information anymore and we didnt change anything on that page
+		bufMgr->unPinPage(file, headerPageNum, false);
+
 		//set the root page for this index
 		rootPageNum = metadata->rootPageNo;
+
+		//we are going to keep the rootPage in memory 
+		bufMgr->readPage(file, rootPageNum, rootPage);
 		return;
-	} catch(const FileExistsException &e) {
-		
 	}
 	
-	//if the code reaches here then the file didnt exist so we must create one
-	file = new BlobFile(outIndexName, true);
+	//std::cout << "Creating a new file for this index" << std::endl;
+
+	//if the code reaches here then the file didnt exist but we created one
+	file = (File*) bFile;
 	
-	//make a metadata Page for this new index
+	//make a metadata Page for this new index, should be the first page
 	PageId metadataPageId;
 	bufMgr->allocPage(file, metadataPageId, metadataPage);
+	headerPageNum = metadataPageId; //just in case it isnt 1 and we need to get at it later save where it is
 	bufMgr->readPage(file, metadataPageId, metadataPage);
 	metadata = (IndexMetaInfo*) metadataPage;
 	
@@ -102,12 +117,16 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 	strncpy(metadata->relationName, relationName.c_str(), 20);
 	metadata->attrType = attrType;
 	metadata->attrByteOffset = attrByteOffset;
-	
+
 	//create a new root page
-	Page* rootPage;
-	bufMgr->allocPage(file, rootPageNum /*private variable in this class. set here*/, rootPage);
+	bufMgr->allocPage(file, rootPageNum, rootPage);
 	bufMgr->readPage(file, rootPageNum, rootPage);
 	metadata->rootPageNo = rootPageNum;
+
+	//std::cout << "rootPageNum = " << rootPageNum << std::endl;
+
+	//now we can unpin the metaPage. Its dirty and needs to be written to disk
+	bufMgr->unPinPage(file, metadataPageId, true);
 	
 	//the rootPage will become a non-leaf node
 	switch(attrType) {
@@ -115,29 +134,44 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			//initialize the rootNode with NULL key, pageNo pairs
 			NonLeafNodeInt* rootNode = (NonLeafNodeInt*) rootPage;
 			rootNode->level = 1;
-			for(int i = 0; i < nodeOccupancy; i++) rootNode->keyArray[i] = NULL;
+			for(int i = 0; i < nodeOccupancy; i++) rootNode->keyArray[i] = INT_MAX;
 			for(int i = 0; i < nodeOccupancy + 1; i++) rootNode->pageNoArray[i] = NULL;
 
-			//create an empty leaf page of the attribute type
-			Page* leafPage; PageId leafPageId;
-			bufMgr->allocPage(file, leafPageId, leafPage);
-			bufMgr->readPage(file, leafPageId, leafPage);
-			LeafNodeInt* leafNode = (LeafNodeInt*) leafPage;
+			//create an empty left leaf page and right leaf page of the attribute type
+			Page* leftLeafPage, *rightLeafPage; 
+			PageId leftLeafPageId;
+			PageId rightLeafPageId;
 
+			bufMgr->allocPage(file, leftLeafPageId, leftLeafPage);
+			bufMgr->allocPage(file, rightLeafPageId, rightLeafPage);
+			
+			bufMgr->readPage(file, leftLeafPageId, leftLeafPage);
+			bufMgr->readPage(file, rightLeafPageId, rightLeafPage);
+
+			LeafNodeInt* leftLeafNode = (LeafNodeInt*) leftLeafPage;
+			LeafNodeInt* rightLeafNode = (LeafNodeInt*) rightLeafPage;
+			
 			//initialize the leaf page
-			leafNode->rightSibPageNo = NULL;
-			for(int i = 0; i < leafOccupancy; i++) leafNode->keyArray[i] = NULL;
 			for(int i = 0; i < leafOccupancy; i++) {
-				RecordId rid;
-				rid.page_number = NULL;
-				rid.slot_number = NULL;
-				leafNode->ridArray[i] = rid;
+				leftLeafNode->keyArray[i] = INT_MAX;
+				rightLeafNode->keyArray[i] = INT_MAX;
 			}
 
-			rootNode->pageNoArray[0] = leafPageId;
+			leftLeafNode->rightSibPageNo = rightLeafPageId;
+			rightLeafNode->rightSibPageNo = NULL;
+
+			rootNode->pageNoArray[0] = leftLeafPageId;
+			rootNode->pageNoArray[1] = rightLeafPageId;
+
+			//unpin the new leaf page. its dirty
+			bufMgr->unPinPage(file, leftLeafPageId, true);
+			bufMgr->unPinPage(file, rightLeafPageId, true);
 			break;
 		}
 		case Datatype::DOUBLE: {
+
+			//TODO: follow template from int. things have changed in there and havent made it to each double and string yet
+
 			//initialize the rootNode with NULL key, pageNo pairs
 			NonLeafNodeDouble* rootNode = (NonLeafNodeDouble*) rootPage;
 			rootNode->level = 1;
@@ -164,6 +198,9 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			break;
 		}
 		case Datatype::STRING: {
+
+			//TODO: follow template from int. things have changed in there and havent made it to each double and string yet
+
 			//initialize the rootNode with NULL key, pageNo pairs
 			NonLeafNodeString* rootNode = (NonLeafNodeString*) rootPage;
 			rootNode->level = 1;
@@ -193,7 +230,7 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 			rootNode->pageNoArray[0] = leafPageId;
 			break;
 		}
-		default: {};
+		default: { break; }
 	}
 
 	
@@ -214,30 +251,62 @@ BTreeIndex::BTreeIndex(const std::string & relationName,
 
 			switch(attrType) {
 				case INTEGER:
-					insertEntry((int*) (recordPtr + attrByteOffset), rid);
+					//std::cout << *((int*) (recordPtr + attrByteOffset)) << std::endl;
+					//std::cout << "\t" << rid.page_number << " " << rid.slot_number << std::endl;
+					insertEntry((void*) (recordPtr + attrByteOffset), rid);
 					break;
 				case DOUBLE:
-					insertEntry((double*) (recordPtr + attrByteOffset), rid);
+					insertEntry((void*) (recordPtr + attrByteOffset), rid);
 					break;
 				case STRING: 
 					char keyBuf[STRINGSIZE];
 					strncpy(keyBuf, (char*)(recordPtr + attrByteOffset), sizeof(keyBuf));
 					key = std::string(keyBuf);
-					insertEntry(&key, rid);
+					insertEntry((void*) &key, rid);
 					break;
-				default: ;
+				default: { break; }
 			}
 		}
 	} catch (EndOfFileException &e) {
 		//end of the scan has been reached
 	}
-}
+	
+	/*
+	int i;
+	for(i = 0; i < nodeOccupancy; i++) {
+		if(((NonLeafNodeInt*) rootPage)->keyArray[i] != INT_MAX) {
+			Page* page;
+			bufMgr->readPage(file, ((NonLeafNodeInt*) rootPage)->pageNoArray[i], page);
+			LeafNodeInt* leaf = (LeafNodeInt*) page;
+			std::cout << "(" << ((NonLeafNodeInt*) rootPage)->pageNoArray[i] << ", " << ((NonLeafNodeInt*) rootPage)->keyArray[i] << ", " << leaf->rightSibPageNo <<") ";
+		}
+		else break;
+	}
 
+	Page* mypage;
+	bufMgr->readPage(file, 4, mypage);
+	LeafNodeInt* mynode = (LeafNodeInt*) mypage;
+	std::cout << "@@@@@@@@@PAGE4" << std::endl;
+	for(int j = 0; j < leafOccupancy; j++) {
+		if(mynode->keyArray[j] != INT_MAX) std::cout << j << ":" << mynode->keyArray[j] << " ~ ";
+	}
+	std::cout << " " << std::endl;
+
+	bufMgr->readPage(file, 5, mypage);
+	mynode = (LeafNodeInt*) mypage;
+	std::cout << "@@@@@@@@@PAGE5" << std::endl;
+	for(int j = 0; j < leafOccupancy; j++) {
+		if(mynode->keyArray[j] != INT_MAX) std::cout << j << ":" << mynode->keyArray[j] << " ~ ";
+	}
+	std::cout << std::endl;
+		
+	//std::cout << ((NonLeafNodeInt*) rootPage)->pageNoArray[i] << std::endl;
+	*/
+}
 
 // -----------------------------------------------------------------------------
 // BTreeIndex::~BTreeIndex -- destructor
 // -----------------------------------------------------------------------------
-
 BTreeIndex::~BTreeIndex()
 {
 	// Destructor. Method does not throw any exceptions as is indicated in the header file. All exceptions are caught in here itself.
@@ -270,26 +339,441 @@ BTreeIndex::~BTreeIndex()
 }
 
 // -----------------------------------------------------------------------------
-// BTreeIndex::getLeafBasedOnKey
+// BTreeIndex::insertEntry
 // -----------------------------------------------------------------------------
-const void BTreeIndex::traverseAndInsert(Page* page, int pageLevel, bool isRoot, const void* keyPtr, const RecordId rid, bool &restructured, Page* &newPage) {
-	switch(attrType) {
+const void BTreeIndex::insertEntry(const void *key, const RecordId rid) 
+{
+	//read in the root page. Should already be in the buffer
+	Page* rootPage;
+	bufMgr->readPage(file, rootPageNum, rootPage);
+
+	//cast the rootPage to a non leaf node depending on type
+	switch(attributeType) {
+		case Datatype::INTEGER: {
+			NonLeafNodeInt* rootNode = (NonLeafNodeInt*) rootPage;
+			bool restructured;
+			bool comingFromLeaf;
+			PageId newPageId;
+			//const void* middleKey;
+
+			traverseAndInsert(rootPage, rootNode->level, true, key, rid, restructured, newPageId, comingFromLeaf);
+
+			//TODO: if the root was restructured then update the metapage!!!
+			if(restructured) {
+				if(rootNode->keyArray[nodeOccupancy - 1] == INT_MAX) {
+
+					insertIntoNonLeafPage(rootPage, (void*) &middleInt, newPageId);
+
+				} else {
+					
+					//FIX BELOW
+					/*
+					restructured = true;
+
+					restructure(rootPage, false, middleKey, newPageId, newPageId, middleKey);
+
+					//only need to insert if 
+					if(*((int*) middleKeyFromChild) < *((int*) middleKey)) {
+						//insert it onto old node (nodeInt)
+						insertIntoNonLeafPage(page, middleKeyFromChild, pageIdFromChild);
+					} else if(*((int*) middleKeyFromChild) > *((int*) middleKey)) {
+						//insert it onto the new node the child created
+						//read in that page
+						Page* newNodePage;
+						bufMgr->readPage(file, newPageId, newNodePage);
+
+						insertIntoNonLeafPage(newNodePage, middleKeyFromChild, pageIdFromChild);
+
+						//TODO: unpin that page
+					}
+					*/
+				}
+			}
+			//read in the new root page given the pageId from the function
+
+			//unpin the old root page
+
+			break;
+		}
+		case Datatype::DOUBLE: {
+			break;
+		}
+		case Datatype::STRING: {
+			break;
+		}
+		default: {};
+	}
+}
+
+// -----------------------------------------------------------------------------
+// BTreeIndex::startScan
+// -----------------------------------------------------------------------------
+const void BTreeIndex::startScan(const void* lowValParm, const Operator lowOpParm, const void* highValParm, const Operator highOpParm) {
+	if(scanExecuting) {
+		return;
+	}
+
+	//set the local values for this class to the values passed in
+	lowOp = lowOpParm;
+	highOp = highOpParm;
+
+	// lowOp must be either GT/GTE and highOp must be LT/LTE. BadOpCodesException is thrown if that is not the case.
+	if( !((lowOp == GT)||(lowOp == GTE)) || !((highOp == LT)||(highOp == LTE)) ) {
+		throw BadOpcodesException();
+	}
+
+	//std::cout << "STARTING TO SCAN" << std::endl;
+
+	//read in the rootPage
+	Page* rootPage;
+	bufMgr->readPage(file, rootPageNum, rootPage);
+
+	switch(attributeType) {
+		case INTEGER: {
+			lowValInt = *((int*) lowValParm);
+			highValInt = *((int*) highValParm);
+
+			// Method throws exception if lower bound > upper bound
+			if(lowValInt > highValInt) {
+				throw BadScanrangeException();
+			}
+
+			//traverse to get to the leafPageId
+			Page* leafPage;
+			PageId leafPageId;
+			traverse(rootPage, ((NonLeafNodeInt*) rootPage)->level, lowValParm, leafPageId);
+			bufMgr->readPage(file, leafPageId, leafPage);
+			LeafNodeInt* leaf = (LeafNodeInt*) leafPage;
+
+			//find the first record then set the class variables
+			bool firstRecordFound = false;
+			while(!firstRecordFound) {
+				//loop through all the keys on the leaf
+
+				//std::cout << "searching page " << leafPageId << " lowOP " << lowOp << " high OP " << highOp << std::endl;
+
+				for(int i = 0; i < leafOccupancy; i++) {
+					//if(leaf->keyArray[i] != INT_MAX) std::cout << "keyArray[" << i << "] = " << leaf->keyArray[i] << std::endl;
+
+					if(leaf->keyArray[i] != INT_MAX && 
+						((lowOp == GT && leaf->keyArray[i] > lowValInt) || (lowOp == GTE && leaf->keyArray[i] >= lowValInt)) && 
+						((highOp == LT && leaf->keyArray[i] < highValInt) || (highOp == LTE && leaf->keyArray[i] <= highValInt))) {
+						currentPageData = leafPage;
+						currentPageNum = leafPageId;
+						nextEntry = i;
+
+						//std::cout << "Found " << leaf->keyArray[i] << " at index " << i << " on page " << leafPageId << std::endl;
+						//for(int j = 0; j < leafOccupancy; j++) {
+						//	std::cout << j << ":" << leaf->keyArray[j] << " ~ ";
+						//}
+						//std::cout << std::endl;
+						firstRecordFound = true;
+						break;
+					} 
+				}
+
+				//if the first record still hasnt been found, check the next page
+				if(!firstRecordFound) {
+					//read in the next page if you can
+					if(leaf->rightSibPageNo != NULL) {
+						PageId nextPageId = leaf->rightSibPageNo;
+						bufMgr->readPage(file, nextPageId, leafPage);
+
+						//unpin the previous one
+						bufMgr->unPinPage(file, leafPageId, false);
+						
+						//set the new pointer to the page that was just read in
+						leafPageId = nextPageId;
+						leaf = (LeafNodeInt*) leafPage;
+					} else {
+						//we've reached the end of our data and still havent found anything greater than the lowParm
+						nextEntry = -1;
+						firstRecordFound = true; //just to break out of the loop
+					}
+					
+				}
+			}
+			break;
+		}
+		case DOUBLE: {
+		
+			break;
+		}
+		case STRING: {
+		
+			break;
+		}
+		default: { break; }
+	
+	}
+
+
+	//after we know everything is good to go, then set scanExecuting = true
+	scanExecuting = true;
+	
+	//switch on attrType and cast the void* to appropriate type
+
+	//find the leaf page where the lowValParm would fit in as a key
+	
+	//read the rootPage into the bufMgr
+	//cast that page to a non-leaf node
+
+	// Where to unpin
+
+	//while(node->level == 0) {
+	//	loop through the keys in that level to find where lowValParm would go
+	//	set node = child pointed to by page (make sure to read the page into memory first)
+	//	break from the for loop when you find the correct page
+	//}
+
+	//node now equals the level above the correct leaf
+	//create a pointer to a leaf page called leaf
+
+	//once again loop through the node (nonLeafNode) 
+	//	find where the lowValParm would go and read that page into the bufMgr
+	//
+	//set leaf to leafNode* cast of the page pointer
+
+	//loop through the keys on the leaf page
+	//(unpin page before throw exception)
+	//if the first key you find that is bigger than the lower bound and upper bound, then exception
+	//or if the lower bound is larger than the last key, then exception
+
+	//
+
+
+}
+
+// -----------------------------------------------------------------------------
+// BTreeIndex::scanNext
+// -----------------------------------------------------------------------------
+const void BTreeIndex::scanNext(RecordId& outRid) 
+{
+	if(!scanExecuting) throw ScanNotInitializedException();
+
+	if(nextEntry == -1) throw  IndexScanCompletedException();
+
+	//read in the page that we are currently scanning
+	bufMgr->readPage(file, currentPageNum, currentPageData);
+
+	switch(attributeType) {
+		case INTEGER: {
+			LeafNodeInt* leaf = (LeafNodeInt*) currentPageData;
+			outRid = leaf->ridArray[nextEntry];
+
+			//std::cout << "currPageNum=" << currentPageNum << " keyArray[" << nextEntry << "] = " << leaf->keyArray[nextEntry] << std::endl;
+
+			if(nextEntry == leafOccupancy - 1 || leaf->keyArray[nextEntry+1] == INT_MAX) {
+				//bring in the next page if we can. if there is no next page then set nextEntry to -1 
+				if(leaf->rightSibPageNo != NULL) {
+					Page* nextPage;
+					PageId newPageId = leaf->rightSibPageNo;
+					bufMgr->readPage(file, newPageId, nextPage);
+
+					//unpin the previous page
+					bufMgr->unPinPage(file, currentPageNum, false);
+					currentPageData = nextPage;
+					currentPageNum = newPageId;
+
+					leaf = (LeafNodeInt*) nextPage;
+					if((highOp == LT && leaf->keyArray[0] < highValInt) || (highOp == LTE && leaf->keyArray[0] <= highValInt)) {
+						nextEntry = 0;
+					} else {
+						nextEntry = -1;
+					}
+				} else {
+					nextEntry = -1;
+				}
+				
+			} else {
+				if((highOp == LT && leaf->keyArray[nextEntry+1] < highValInt) || (highOp == LTE && leaf->keyArray[nextEntry+1] <= highValInt)) {
+					nextEntry++;
+				} else {
+					nextEntry = -1;
+				}
+			}
+
+			break;
+		}
+		case DOUBLE: {
+		
+			break;
+		} 
+		case STRING: { 
+		
+			break;
+		}
+		default: { break; }
+	}
+}
+
+// -----------------------------------------------------------------------------
+// BTreeIndex::endScan
+// -----------------------------------------------------------------------------
+const void BTreeIndex::endScan() 
+{
+	// Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
+	if(!scanExecuting){
+		throw ScanNotInitializedException();
+	}
+	scanExecuting = false;
+
+	// Unpinning all the pages that have been pinned for the purpose of scan
+	try {
+		bufMgr->unPinPage(file, currentPageNum, false);
+	} catch(const PageNotPinnedException &e) {
+		std::cout << "PageNotPinned thrown in endScan()\n";
+	}
+	// TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
+	// TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
+}
+
+
+// -----------------------------------------------------------------------------
+// BTreeIndex::insertIntoNonLeafPage
+// -----------------------------------------------------------------------------
+const void BTreeIndex::insertIntoNonLeafPage(Page* page, const void* keyPtr, PageId pageId) {
+	switch(attributeType) {
+		case INTEGER: {
+			NonLeafNodeInt* node = (NonLeafNodeInt*) page;
+			int key = *((int*) keyPtr);
+
+			for(int i = 0; i < nodeOccupancy; i++) {
+				if(node->keyArray[i] == INT_MAX) {
+					node->keyArray[i] = key;
+					node->pageNoArray[i+1] = pageId;
+					break;
+				} else if(key < node->keyArray[i]) {
+					//move everything over to the right
+					for(int j = nodeOccupancy - 1; j <= i; j--) {
+						node->keyArray[j] = node->keyArray[j-1];
+						node->pageNoArray[j+1] = node->pageNoArray[j];
+					}
+					node->keyArray[i] = key;
+					node->pageNoArray[i+1] = pageId;
+					break;
+				}
+			}
+			break;
+		}
+		case DOUBLE: {
+
+			break;
+		}
+		case STRING: {
+
+			break;
+		}
+		default: {break; }
+	}
+}
+
+// -----------------------------------------------------------------------------
+// BTreeIndex::restructure
+// -----------------------------------------------------------------------------
+const void BTreeIndex::restructure(Page* fullPage, bool isLeaf, const void* keyPtr, PageId newPageIdFromChild, PageId &newPageId) {
+	switch(attributeType) {
+		case INTEGER: {
+			if(isLeaf) {
+				//cast the fullPage to a leaf
+				LeafNodeInt* fullLeaf = (LeafNodeInt*) fullPage;
+
+				//create a new page
+				Page* newLeafPage;
+				bufMgr->allocPage(file, newPageId, newLeafPage);
+				bufMgr->readPage(file, newPageId, newLeafPage);
+				LeafNodeInt* newLeaf = (LeafNodeInt*) newLeafPage;
+
+				//NULL everything in the new page
+				for(int i = 0; i < leafOccupancy; i++) {
+					newLeaf->keyArray[i] = INT_MAX;
+					//not NULLing the rids here because we just assume if the key is NULL then so is the associated rid so don't access it
+				}
+
+				//get the middle value and index from the page
+				int middleIndex;
+				findMiddleValue(fullPage, true, keyPtr, middleIndex);
+
+				//copy all the keys and rids over from middleIndex
+				for(int i = middleIndex; i < leafOccupancy; i++) {
+					newLeaf->keyArray[i-middleIndex] = fullLeaf->keyArray[i];
+					fullLeaf->keyArray[i] = INT_MAX;
+					newLeaf->ridArray[i-middleIndex] = fullLeaf->ridArray[i];
+					//not NULLing rids here again, just check if corresponding key is null to see if the data is valid
+				}
+
+				newLeaf->rightSibPageNo = fullLeaf->rightSibPageNo;
+				fullLeaf->rightSibPageNo = newPageId;
+			} else {
+				//cast the fullPage to a nonleaf
+				NonLeafNodeInt* fullNode = (NonLeafNodeInt*) fullPage;
+
+				//create a new page
+				Page* newNodePage;
+				bufMgr->allocPage(file, newPageId, newNodePage);
+				bufMgr->readPage(file, newPageId, newNodePage);
+				NonLeafNodeInt* newNode = (NonLeafNodeInt*) newNodePage;
+
+				//NULL everything in the new page 
+				newNode->pageNoArray[nodeOccupancy] = NULL;
+				for(int i = 0; i < nodeOccupancy; i++) {
+					newNode->keyArray[i] = INT_MAX;
+					newNode->pageNoArray[i] = NULL;
+				}
+
+				//get the middle value and index from the page
+				int middleIndex;
+				findMiddleValue(fullPage, false, keyPtr, middleIndex);
+
+				//if the keyPtr we are trying to insert is the middle one the some special stuff happens
+				if(*((int*) keyPtr) == middleInt) {
+					newNode->pageNoArray[0] = newPageIdFromChild;
+
+					for(int i = middleIndex + 1; i < nodeOccupancy; i++) {
+						newNode->keyArray[i-middleIndex-1] = fullNode->keyArray[i];
+						fullNode->keyArray[i] = INT_MAX;
+						newNode->pageNoArray[i-middleIndex] = fullNode->pageNoArray[i+1];
+					}
+				} else {
+					for(int i = middleIndex + 1; i < nodeOccupancy; i++) {
+						newNode->keyArray[i-middleIndex-1] = fullNode->keyArray[i];
+						fullNode->keyArray[i] = INT_MAX;
+						newNode->pageNoArray[i-middleIndex-1] = fullNode->pageNoArray[i];
+					}
+					newNode->pageNoArray[nodeOccupancy-middleIndex+1] = fullNode->pageNoArray[nodeOccupancy];
+				}
+			}
+			break;
+		}
+		case DOUBLE: {
+		
+			break;
+		}
+		case STRING: {
+		
+			break;
+		}
+		default: { break; }
+	}
+}
+
+// -----------------------------------------------------------------------------
+// BTreeIndex::traverseAndInsert
+// -----------------------------------------------------------------------------
+const void BTreeIndex::traverseAndInsert(Page* page, int pageLevel, bool isRoot, const void* keyPtr, const RecordId rid, bool &restructured, PageId &newPageId, bool &comingFromLeaf) {
+	switch(attributeType) {
 		case INTEGER: {
 			int key = *((int*) keyPtr);
 			NonLeafNodeInt* nodeInt = (NonLeafNodeInt*) page;
-			if(isRoot && nodeInt->keyArray[0] == NULL) {
+
+			if(isRoot && nodeInt->keyArray[0] == INT_MAX) {
 				//set the first key in the root 
 				nodeInt->keyArray[0] = key;
-
-				//create a right page (left page already exists from the constructor)
-				Page* leafPage; PageId leafPageId;
-				bufMgr->allocPage(file, leafPageId, leafPage);
-				nodeInt->pageNoArray[1] = leafPageId;
 			}
 
-			Page* addedPage;
-			bool childRestructured;
 			if(pageLevel == 0) {
+				comingFromLeaf = false;
+
 				//find where the key would go
 				int index = findIndexIntoPageNoArray(page, keyPtr);
 
@@ -298,21 +782,165 @@ const void BTreeIndex::traverseAndInsert(Page* page, int pageLevel, bool isRoot,
 				bufMgr->readPage(file, nodeInt->pageNoArray[index], child);
 
 				//recurse into that child
-				traverseAndInsert(child, ((NonLeafPageInt*) child)->level, false, keyPtr, rid, childRestructured, addedPage);
+				PageId pageIdFromChild;
+				bool childRestructured;
+				bool fromLeaf;
+				traverseAndInsert(child, ((NonLeafNodeInt*) child)->level, false, keyPtr, rid, childRestructured, pageIdFromChild, fromLeaf);
+
+				if(childRestructured) {
+					//std::cout << "CHILD WAS RESTRUCTURED : new page = " << pageIdFromChild << std::endl;
+					if(fromLeaf) {
+						//read the pageIdFromChild and set its level to 1
+						Page* pageFromChild;
+						NonLeafNodeInt* nodeFromChild;
+						bufMgr->readPage(file, pageIdFromChild, pageFromChild);
+						nodeFromChild = (NonLeafNodeInt*) pageFromChild;
+						nodeFromChild->level = 1;
+
+						//unpin the page
+						bufMgr->unPinPage(file, pageIdFromChild, true);
+					}
+					//if there is room we can just add the key here and shift everything over
+					if(nodeInt->keyArray[nodeOccupancy - 1] == INT_MAX) {
+						restructured = false;
+
+						insertIntoNonLeafPage(page, (void*) &middleInt, pageIdFromChild);
+
+					} else {
+						restructured = true;
+						//save the value of middleInt that the previous restructure set
+						int middleIntFromChild = middleInt;
+
+						//
+						restructure(page, false, (void*) &middleIntFromChild, pageIdFromChild, newPageId);
+
+						//only need to insert if 
+						if(middleIntFromChild < middleInt) {
+							//insert it onto old node (nodeInt)
+							insertIntoNonLeafPage(page, (void*) &middleIntFromChild, pageIdFromChild);
+						} else if(middleIntFromChild > middleInt) {
+							//insert it onto the new node the child created
+							//read in that page
+							Page* newNodePage;
+							bufMgr->readPage(file, newPageId, newNodePage);
+
+							insertIntoNonLeafPage(newNodePage, (void*) &middleIntFromChild, pageIdFromChild);
+
+							//TODO: unpin that page
+						}
+					}
+				}
 			}
 			else {
+				comingFromLeaf = true;
 				//we are the parent of the leaf
 				//find what page the leaf is on
-				int index = findIndexIntoPageNoArray(page, keyPtr);
+				int idx = findIndexIntoPageNoArray(page, keyPtr);
+				
+				//std::cout << idx << "   ";
 
 				//read in the leaf page and cast
 				Page* leafPage;
-				bufMgr->readPage(file, nodeInt->pageNoArray[index], leaf);
-				LeafNodeInt* leaf = (LeafNodeInt*) page;
+				PageId leafPageId = nodeInt->pageNoArray[idx];
+				bufMgr->readPage(file, leafPageId, leafPage);
+				LeafNodeInt* leaf = (LeafNodeInt*) leafPage;
 
 				//find the index into the key array where the rid would go
-				int index = findIndexIntoKeyArray(page, keyPtr);
+				int index = findIndexIntoKeyArray(leafPage, keyPtr);
+
+				//std::cout << index << "   ";
+
+				//try to insert into the leaf page
+				//if the last place in the leaf is NULL then we dont have to restructure 
+				if(leaf->keyArray[leafOccupancy - 1] == INT_MAX) {
+					restructured = false;
+
+					//move entries over one place (start at the end)
+					for(int i = leafOccupancy - 1; i < index; i--) {
+						leaf->keyArray[i] = leaf->keyArray[i - 1];
+						leaf->ridArray[i] = leaf->ridArray[i - 1];
+					}
+
+					//actually insert the entry
+					//std::cout << "INSERTING1: " << key << " on page No. " << nodeInt->pageNoArray[idx] << std::endl;
+					leaf->keyArray[index] = key;
+					leaf->ridArray[index].page_number = rid.page_number;
+					leaf->ridArray[index].slot_number = rid.slot_number;
+				} else {
+					restructured = true;
+
+					/*
+					std::cout << "LEAF PAGE " << leafPageId << " BEFORE RESTRUCTURE" << std::endl;
+					Page* prevPage;
+					bufMgr->readPage(file, leafPageId, prevPage);
+					LeafNodeInt* mynode = (LeafNodeInt*) prevPage;
+					for(int j = 0; j < leafOccupancy; j++) {
+						if(mynode->keyArray[j] != INT_MAX) std::cout << j << ":" << mynode->keyArray[j] << " ~ ";
+					}
+					std::cout << " " << std::endl;
+					*/
+
+					restructure(leafPage, true, keyPtr, NULL, newPageId);
+
+					/*
+					std::cout << "LEAF PAGE " << leafPageId << " AFTER RESTRUCTURE" << std::endl;
+					bufMgr->readPage(file, leafPageId, prevPage);
+					mynode = (LeafNodeInt*) prevPage;
+					for(int j = 0; j < leafOccupancy; j++) {
+						if(mynode->keyArray[j] != INT_MAX) std::cout << j << ":" << mynode->keyArray[j] << " ~ ";
+					}
+					std::cout << " " << std::endl;
+
+					std::cout << "NEW LEAF PAGE " << newPageId << " AFTER RESTRUCTURE" << std::endl;
+					bufMgr->readPage(file, newPageId, prevPage);
+					mynode = (LeafNodeInt*) prevPage;
+					for(int j = 0; j < leafOccupancy; j++) {
+						if(mynode->keyArray[j] != INT_MAX) std::cout << j << ":" << mynode->keyArray[j] << " ~ ";
+					}
+					std::cout << " " << std::endl;
+
+					std::cout << "MIDDLE VALUE = " << middleInt << std::endl;
+					*/
+					//now actually put the entry passed in on one of these pages
+					if(*((int*) keyPtr) >= middleInt) {
+						Page* newLeafPage;
+						bufMgr->readPage(file, newPageId, newLeafPage);
+
+						LeafNodeInt* newLeaf = (LeafNodeInt*) newLeafPage;
+
+						int index = findIndexIntoKeyArray(newLeafPage, keyPtr);
+
+						//move the keys over on this page
+						for(int i = leafOccupancy - 1; i <= index; i--) {
+							newLeaf->keyArray[i] = newLeaf->keyArray[i - 1];
+							newLeaf->ridArray[i].page_number = newLeaf->ridArray[i - 1].page_number;
+							newLeaf->ridArray[i].slot_number = newLeaf->ridArray[i - 1].slot_number;
+						}
+
+						//actually insert the record
+						//std::cout << "INSERTING2: " << key << " on page No. " << newPageId << std::endl;
+						newLeaf->keyArray[index] = key;
+						newLeaf->ridArray[index].page_number = rid.page_number;
+						newLeaf->ridArray[index].slot_number = rid.slot_number;
+					} else {
+						int index = findIndexIntoKeyArray(leafPage, keyPtr);
+						
+						//move the keys over on this page
+						for(int i = leafOccupancy - 1; i <= index; i--) {
+							leaf->keyArray[i] = leaf->keyArray[i - 1];
+							leaf->ridArray[i].page_number = leaf->ridArray[i - 1].page_number;
+							leaf->ridArray[i].slot_number = leaf->ridArray[i - 1].slot_number;
+						}
+
+						//actually insert the record
+						//std::cout << "INSERTING3: " << key << " on page No. " << leafPageId << std::endl;
+						leaf->keyArray[index] = key;
+						leaf->ridArray[index].page_number = rid.page_number;
+						leaf->ridArray[index].slot_number = rid.slot_number;
+					}
+				}
 			}
+
 			break;
 		}
 		case DOUBLE: {
@@ -327,16 +955,18 @@ const void BTreeIndex::traverseAndInsert(Page* page, int pageLevel, bool isRoot,
 	}
 }
 
-//assumes leaf page
+// -----------------------------------------------------------------------------
+// BTreeIndex::findIndexIntoKeyArray (assumes leaf page)
+// -----------------------------------------------------------------------------
 int BTreeIndex::findIndexIntoKeyArray(Page* page, const void* keyPtr) {
-	switch(attrType) {
+	switch(attributeType) {
 		case INTEGER: {
 			int key = *((int*) keyPtr);
 			LeafNodeInt* leaf = (LeafNodeInt*) page;
 			for(int i = 0; i < leafOccupancy; i++) {
-				if(key < leaf->keyArray[0]) return 0;
+				if(leaf->keyArray[0] == INT_MAX || key < leaf->keyArray[0]) return 0;
 				else if(key > leaf->keyArray[i] && i != leafOccupancy - 1 && key < leaf->keyArray[i + 1]) return i + 1;
-				else if(key > leaf->keyArray[i] && (i == leafOccupancy - 1 || leaf->keyArray[i + 1] == NULL)) return i + 1;
+				else if(key > leaf->keyArray[i] && (i == leafOccupancy - 1 || leaf->keyArray[i + 1] == INT_MAX)) return i + 1;
 			}
 			break;
 		}
@@ -350,19 +980,32 @@ int BTreeIndex::findIndexIntoKeyArray(Page* page, const void* keyPtr) {
 		}
 		default: {break;}
 	}
+
+	//should always return in the switch statement
+	return -1;
 }
 
-//assumes page is non-leaf
+// -----------------------------------------------------------------------------
+// BTreeIndex::findIndexIntoPageNoArray (assumes non leaf page)
+// -----------------------------------------------------------------------------
 int BTreeIndex::findIndexIntoPageNoArray(Page* page, const void* keyPtr) {
-	switch(attrType) {
+	switch(attributeType) {
 		case INTEGER: {
 			int key = *((int*) keyPtr);
 			NonLeafNodeInt* nodeInt = (NonLeafNodeInt*) page;
+
 			for(int i = 0; i < nodeOccupancy; i++) {
-				if(key < nodeInt->keyArray[0]) return 0;
-				else if(key > nodeInt->keyArray[i] && i != nodeOccupancy - 1 && key < nodeInt->keyArray[i + 1]) return i + 1;
-				else if(key > nodeInt->keyArray[i] && (i == nodeOccupancy - 1 || nodeInt->keyArray[i + 1] == NULL)) return i + 1;
+				if(key < nodeInt->keyArray[0]) {
+					return 0; 
+				}
+				else if(key >= nodeInt->keyArray[i] && !(i == nodeOccupancy - 1 || nodeInt->keyArray[i+1] == INT_MAX) && key < nodeInt->keyArray[i + 1]) {
+					return i + 1;
+				}
+				else if(key >= nodeInt->keyArray[i] && (i == nodeOccupancy - 1 || nodeInt->keyArray[i + 1] == INT_MAX)) {
+					return i + 1;
+				}
 			}
+
 			break;
 		}
 		case DOUBLE: {
@@ -375,515 +1018,145 @@ int BTreeIndex::findIndexIntoPageNoArray(Page* page, const void* keyPtr) {
 		}
 		default: {break;}
 	}
+
+	//should always return in the switch statement
+	return -1;
 }
 
 // -----------------------------------------------------------------------------
-// BTreeIndex::insertEntry
+// BTreeIndex::findMiddleValue (called by restructure)
 // -----------------------------------------------------------------------------
-
-const void BTreeIndex::insertEntry(const void *key, const RecordId rid) 
-{
-	//read in the root page. 
-	Page* rootPage;
-	bufMgr->readPage(file, rootPageNum, rootPage);
-
-	//cast the rootPage to a non leaf node depending on type
+void BTreeIndex::findMiddleValue(Page* page, bool isLeaf, const void* keyPtr, int &middleIndex) {
 	switch(attributeType) {
-		case Datatype::INTEGER: {
-			//iteratively search from the root
-			NonLeafNodeInt* node = (NonLeafNodeInt*) rootPage;
-			int keyValue = *((int*) key);
-			int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]);
-
-			//keep traversing until level == 1. then we are one level above the leaves
-			while(node->level == 0) {
-				for(int i = 0; i < length; i++) {
-					//if it's less than the first then take the value at 0
-					if(keyValue < node->keyArray[0]) {
-						Page* child; 
-						bufMgr->readPage(file, node->pageNoArray[0], child);
-						node = (NonLeafNodeInt*) child;
-						break;
+		case INTEGER: {
+			if(isLeaf) {
+				LeafNodeInt* leaf = (LeafNodeInt*) page;
+				int key = *((int*) keyPtr);
+				if(leafOccupancy % 2 == 0) {
+					if(key > leaf->keyArray[leafOccupancy/2 - 1] && key < leaf->keyArray[leafOccupancy/2]) {
+						middleInt = key;
+						middleIndex = leafOccupancy/2;
 					}
-					//if its between the current position and the next position and we are not at the end
-					else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
-						Page* child;
-						bufMgr->readPage(file, node->pageNoArray[i+1], child);
-						node = (NonLeafNodeInt*) child;
-						break;
+					else if(key > leaf->keyArray[leafOccupancy/2]) {
+						middleInt = (leaf->keyArray[leafOccupancy/2]);
+						middleIndex = leafOccupancy/2;
 					}
-					//if its greater than the last value
-					else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
-						Page* child;
-						bufMgr->readPage(file, node->pageNoArray[i+1], child);
-						node = (NonLeafNodeInt*) child;
-						break;
+					else {
+						middleInt = (leaf->keyArray[leafOccupancy/2 - 1]);
+						middleIndex = leafOccupancy/2 - 1;
 					}
+				} else {
+					middleInt = (leaf->keyArray[leafOccupancy/2]);
+					middleIndex = leafOccupancy/2;
 				}
-			}
-
-			//at this point we know node is the parent of the page the rid is on so we need to search once more
-			//find which page the data is on
-			Page* leafPage;
-			LeafNodeInt* leaf;
-			
-			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN
-
-			if(node->keyArray[0] == NULL) {
-				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
-				leaf = (LeafNodeInt*) leafPage;
 			} else {
-				for(int i = 0; i < length; i++) {
-					if(keyValue < node->keyArray[0]) {
-						bufMgr->readPage(file, node->pageNoArray[0], leafPage);
-						leaf = (LeafNodeInt*) leafPage;
-						break;
-					} else if(keyValue > node->keyArray[i] && i != length && keyValue < node->keyArray[i+1]) {
-						bufMgr->readPage(file, node->pageNoArray[i+1], leafPage);
-						leaf = (LeafNodeInt*) leafPage;
-						break;
-					} else if(keyValue > node->keyArray[i] && (i == length || node->keyArray[i+1] == NULL)) {
-						bufMgr->readPage(file, node->pageNoArray[i+1], leafPage);
-						leaf = (LeafNodeInt*) leafPage;
-						break;
+				NonLeafNodeInt* node = (NonLeafNodeInt*) page;
+				int key = *((int*) keyPtr);
+				if(nodeOccupancy % 2 == 0) {
+					if(key > node->keyArray[nodeOccupancy/2 - 1] && key < node->keyArray[nodeOccupancy/2]) {
+						middleInt = key;
+						middleIndex = nodeOccupancy/2 - 1;
+					}
+					else if(key > node->keyArray[nodeOccupancy/2]) {
+						middleInt = (node->keyArray[nodeOccupancy/2]);
+						middleIndex = nodeOccupancy/2;
+					}
+					else if(key < node->keyArray[nodeOccupancy/2 - 1]){
+						middleInt = (node->keyArray[nodeOccupancy/2 - 1]);
+						middleIndex = nodeOccupancy/2 - 1;
+					} else {
+						//ERROR it equals some key passed it. Too late to throw error here as the data is already in the database 
+					}
+				} else {
+					if(key > node->keyArray[nodeOccupancy/2-1] && key < node->keyArray[nodeOccupancy/2]) {
+						middleInt = key;
+						middleIndex = nodeOccupancy/2 - 1;
+					} else if(key > node->keyArray[nodeOccupancy/2] && key < node->keyArray[nodeOccupancy/2 + 1]) {
+						middleInt = key;
+						middleIndex = nodeOccupancy/2;
+					} else if(key < node->keyArray[nodeOccupancy/2-1]) {
+						middleInt = (node->keyArray[nodeOccupancy/2-1]);
+						middleIndex = nodeOccupancy/2 - 1;
+					} else if(key > node->keyArray[nodeOccupancy/2]) {
+						middleInt = (node->keyArray[nodeOccupancy/2]);
+						middleIndex = nodeOccupancy/2;
+					} else {
+						//ERROR
 					}
 				}
 			}
+			break;
+		}
+		case DOUBLE: {
+			if(isLeaf) {
+				if(leafOccupancy % 2 == 0) {
 
-			//leaf now points to the page where the record should be inserted
-			//loop through the keys and find where this key goes
-			if(leaf->keyArray[INTARRAYLEAFSIZE - 1] != NULL) {
-				//just insert the record
+				} else {
+
+				}
+			} else {
+				if(nodeOccupancy % 2 == 0) {
+
+				} else {
+
+				}
 			}
-			else {
-				//split the leaf page
-				//then insert the 
+			break;
+		}
+		case STRING: {
+			if(isLeaf) {
+				if(leafOccupancy % 2 == 0) {
+
+				} else {
+
+				}
+			} else {
+				if(nodeOccupancy % 2 == 0) {
+
+				} else {
+
+				}
 			}
-
 			break;
 		}
-		case Datatype::DOUBLE: {
-			break;
-		}
-		case Datatype::STRING: {
-			break;
-		}
-		default: {};
-	}
-	//node = rootPage
-	
-	/*
-	PSEDUO CODE HERE
-	while(node.level = 0) {
-		for(i = 0; i < node.keyArray.length; i++) {
-			
-			if(key < node.keyArray[0]) node = pageNoArray[0]; break;
-			else if(key > node.keyArray[i] && i != node.keyArray.length - 1 && key < node.keyArray[i+1]) node = pageNoArray[i+1]; break;
-			else if(key > node.keyArray[i] && (i == node.keyArray.length -1 || node.keyArray[i+1] = INT_MAX)) node = pageNoArray[i+1]; break;
-		}	
-	}
-
-	//now we know we are at the level above the page where we need to insert this (key, rid) tuple
-	//once again find where we need to insert this tuple
-
-	//make sure to cast the leaf node to the correct type
-	for(i = 0; i < keyArray.length; i++) {
-		if(key < node.keyArray[0]) node = pageNoArray[0]; break;
-		else if(key > node.keyArray[i] && i != node.keyArray.length - 1 && key < node.keyArray[i+1]) node = pageNoArray[i+1]; break;
-		else if(key > node.keyArray[i] && (i == node.keyArray.length -1 || node.keyArray[i+1] = INT_MAX)) node = pageNoArray[i+1]; break;
+		default: {break; }
 	}
 	
-	
-	
-	
-	*/
 }
 
 // -----------------------------------------------------------------------------
-// BTreeIndex::startScan
+// BTreeIndex::traverse
 // -----------------------------------------------------------------------------
+const void BTreeIndex::traverse(Page* page, int pageLevel, const void* keyPtr, PageId &leafId) {
+	switch(attributeType) {
+		case INTEGER: {
+			if(pageLevel == 0) {
+				//find the index based on the key pointer
+				int index = findIndexIntoPageNoArray(page, keyPtr);
 
-const void BTreeIndex::startScan(const void* lowValParm,
-				   const Operator lowOpParm,
-				   const void* highValParm,
-				   const Operator highOpParm)
-{
-	// This method begins a filtered scan of the index 
-	
-	// Ending another scan that may be already executing. EndScan can throw a ScanNotInitializedException   
-	if(scanExecuting){
-		try {
-			endScan();
-		} catch(const ScanNotInitializedException &e) { 
-			std::cout << "ScanNotInitializedException thrown in BtreeIndex startScan\n"; 
+				//read in that page and traverse down
+				Page* child;
+				bufMgr->readPage(file, ((NonLeafNodeInt*) page)->pageNoArray[index], child);
+				traverse(child, ((NonLeafNodeInt*) child)->level, keyPtr, leafId);
+
+				//unpin the node page
+				bufMgr->unPinPage(file, ((NonLeafNodeInt*) page)->pageNoArray[index], false);
+			} else {
+				//page is one above the leaf level
+				int index = findIndexIntoPageNoArray(page, keyPtr);
+				leafId = ((NonLeafNodeInt*) page)->pageNoArray[index];
+			}
+			break;
 		}
-	}
-	
-	// TODO: Perhaps clear these variables in the endScan or the destructor or both
-	// Setting up operator member variables in BtreeIndex Class
-	lowOp = lowOpParm;
-	highOp = highOpParm;
-	
+		case DOUBLE: {
 
-	// lowOp must be either GT/GTE and highOp must be LT/LTE. BadOpCodesException is thrown if that is not the case.
-    	if(     !((lowOp == GT)||(lowOp == GTE))  ||     !((highOp == LT)||(highOp == LTE))     ){
-		throw BadOpcodesException();  
-	}
-	
-	// TODO: Perhaps clear these variables in the endScan or the destructor or both
-    	// Setting up other scan related member variables in BTreeIndex Class
-	nextEntry = 0; 
-	currentPageNum = rootPageNum; // Starting at the root
-	Page* rootPage; // Reading in rootPage into buffer
-	bufMgr->readPage(file, rootPageNum, rootPage);
-
-	switch(attributeType){
-
-		case Datatype::INTEGER:
-
-			// TODO: Perhaps clear these variables in the endScan or the destructor or both
-			//Dereferencing by casting void* to int*
-			lowValInt =  *((int*)lowValParm); 
-			highValInt = *((int*)highValParm);
-
-			// Method throws exception if lower bound > upper bound
-			if (lowValInt > highValInt){
-				throw BadScanrangeException();
-			}
-
-			// Starting scan since the range and operators are valid
-			scanExecuting = true;
-
-			// Finding the leaf page with the first RecordID satisfying scan parameters
-
-			// Iterative search starting at the root 
-			NonLeafNodeInt* node = (NonLeafNodeInt*)rootPage;
-			//length is just nodeOccupancy
-			//int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]); // # of keys in the node
-
-			// Traversing until we reach one level above the leaves (level=1)
-			while (node->level == 0){
-
-				// TODO/QUESTION: Can we just move this first condition lowVal < keyArray[0] outside the for loop because it doesnt depend on 'i' and use continue to check if we are one level above the leaf? We can change back if you want
-				// Picking the correct child node by comparing lowVal to each key in this node
-				// If lowVal < first key, then the page number at 0 is picked as child page
-				if (lowValInt <= node->keyArray[0]) { // NOTE: Changed to <=
-					Page* child;
-					PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-					currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-					bufMgr->readPage(file, node->pageNoArray[0], child);
-					node = (NonLeafNodeInt*)child;
-					bufMgr->unPinPage( file, lastPageNum, false ); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-					continue; 	
-				}
-				// If lowVal !< first key, we check other keys in this node
-				for (int i = 0; i < length; i++) {
-					//If its between the current position and the next position and we are not at the end
-					if (lowValInt > node->keyArray[i] && i != length && lowValInt <= node->keyArray[i + 1]) { // NOTE: Changed to <=
-						Page* child;
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i+1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
-						node = (NonLeafNodeInt*)child;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-					//If its greater than the last value
-					else if (lowValInt > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE/ is it equal to the number of keys actually present?
-						Page* child;
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
-						node = (NonLeafNodeInt*)child;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-				}
-
-			}
-
-			//At this point we know node is the parent of the page the rid is on so we need to search once more
-			//to find which page with the first RecordID satisfying scan parameters
-			Page* leafPage;
-			LeafNodeInt* leaf;
-
-			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN // Please check note below
-			if (node->keyArray[0] == NULL) { //QUESTION: Is it really possible that a node has a leaf but no key?
-				PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-				currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
-				leaf = (LeafNodeInt*)leafPage;
-				bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-			}
-			else {
-				for (int i = 0; i < length; i++) {
-					if (lowValInt <= node->keyArray[0]) { //NOTE: Changed to <=
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[0], leafPage);
-						leaf = (LeafNodeInt*)leafPage;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-					else if (lowValInt > node->keyArray[i] && i != length && lowValInt <= node->keyArray[i + 1]) { //NOTE: Changed to <=
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i+1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
-						leaf = (LeafNodeInt*)leafPage;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-					else if (lowValInt > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE or is it equal to the number of keys actually present?
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i+1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
-						leaf = (LeafNodeInt*)leafPage;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-				}
-			}
-
-			
-
-			//Leaf now points to the page where the first recordID may be found
-			//Looping through the keys in the current leaf
-			nextEntry = 0; 
-			while (leaf->keyArray[nextEntry] < lowValInt && nextEntry < INTARRAYLEAFSIZE) //TODO/QUESTION: Dont know if we want to check the Rid.PageNumber=0?
-			{
-					nextEntry++;
-			}
-			// At this point either (1) we found a key with value >= lowVal in the current leaf OR (2) no key in this leaf has value >= lowVal 
-
-			// (1) Either no key in this leaf has value >= lowVal 
-			if (nextEntry >= INTARRAYLEAFSIZE){
-
-				// If a sibling leaf page exists, we read in the sibling leaf 
-				if(leaf->rightSibPageNo != NULL){
-					
-					PageId lastPageNum = currentPageNum;
-					currentPageNum = leaf->rightSibPageNo;
-					bufMgr->readPage(file, currentPageNum, leafPage); 
-					leaf = (LeafNodeInt*)leafPage;
-					bufMgr->unPinPage(file, lastPageNum, false);
-					nextEntry = 0; // set to first entry of sibling leaf
-
-				}
-                	// Else we are the last page, in which case end the scan and throw exception
-				else {
-					
-					//No more leaf pages
-					try {
-						endScan();
-					}
-					catch (const ScanNotInitializedException &e) { //TODO/QUESTION: If we dont to catch the exception here we can get rid of this //TODO/QUESTION: As in the example, instead of calling endScan we can unPin and set scanExec to false, if you want
-						std::cout << "ScanNotInitializedException thrown in BtreeIndex startScan \n";
-					}
-
-					throw NoSuchKeyFoundException(); 
-				}
-
-			}
-			// (2) Or we found a key with value >= lowVal in the current leaf
-			else{
-					// This key has a value = lowVal but low operator is a 'strictly greator than' 
-					if ( leaf->keyArray[nextEntry] == lowValInt && lowOp == GT)
-					{
-							// Calling scanNext to get a key with value > lowVal
-							try
-							{
-								scanNext(leaf->ridArray[nextEntry]);
-							}
-							catch (const IndexScanCompletedException &e) 
-							{
-								// No more records satifying the scan criteria so end the scan
-								try {
-									endScan(); //TODO/QUESTION: As in the example, instead of calling endScan we can unPin and set scanExec to false, if you want
-								}
-								catch (const ScanNotInitializedException &e) { //TODO/QUESTION: If we dont to catch the exception here we can get rid of this // QUESTION: ScanNext itself can also throw a scanNotIniExc not usre if want to catch that
-									std::cout << "ScanNotInitializedException thrown in BtreeIndex startScan \n";
-								}
-								throw NoSuchKeyFoundException();
-							}
-							
-					}
-			}
-			
-
-			// StartScan goal from header: the leaf page that contains the first RecordID that satisfies the scan parameters. 
-			// TODO: Check how exactly would we get to the last leaf if we didnt have a while loop here and just had an if? 
-				
-			//////// FILL IN THE BLANKS ///////////////
 			break;
+		}
+		case STRING: {
 
-
-		case Datatype::DOUBLE:
-			//Dereferencing by casting void* to double* 
-			lowValDouble  = *((double*)lowValParm); 
-			highValDouble = *((double*)highValParm);
-			// Method throws exception if lower bound > upper bound
-			if (lowValDouble > highValDouble){
-				throw BadScanrangeException();
-			}
-			// Starting scan since the range and operators are valid
-			scanExecuting = true;
-			// Finding the leaf page with the first RecordID satisfying scan parameters
-			
-			// Iterative search starting at the root 
-			NonLeafNodeDouble* node = (NonLeafNodeDouble*)rootPage;
-			int length = sizeof(node->keyArray) / sizeof(node->keyArray[0]); // # of keys in the node
-
-			// Traversing until we reach one level above the leaves (level=1)
-			while (node->level == 0){
-
-				// TODO/QUESTION: Can we just move this first condition lowVal < keyArray[0] outside the for loop because it doesnt depend on 'i' and use continue to check if we are one level above the leaf? We can change back if you want
-				// Picking the correct child node by comparing lowVal to each key in this node
-				// If lowVal < first key, then the page number at 0 is picked as child page
-				if (lowValDouble <= node->keyArray[0]) { // NOTE: Changed to <=
-					Page* child;
-					PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-					currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-					bufMgr->readPage(file, node->pageNoArray[0], child);
-					node = (NonLeafNodeDouble*)child;
-					bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-					continue;
-				}
-				// If lowVal !< first key, we check other keys in this node
-				for (int i = 0; i < length; i++) {
-					//If its between the current position and the next position and we are not at the end
-					if (lowValDouble > node->keyArray[i] && i != length && lowValDouble <= node->keyArray[i + 1]) { // NOTE: Changed to <=
-						Page* child;
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
-						node = (NonLeafNodeDouble*)child;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-					//If its greater than the last value
-					else if (lowValDouble > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE/ is it equal to the number of keys actually present?
-						Page* child;
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], child);
-						node = (NonLeafNodeDouble*)child;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-				}
-
-			}
-
-			//At this point we know node is the parent of the page the rid is on so we need to search once more
-			//to find which page with the first RecordID satisfying scan parameters
-			Page* leafPage;
-			LeafNodeDouble* leaf;
-
-			//TODO: if key == any value in leaf node, BAD THINGS HAPPEN // Please check note below
-			if (node->keyArray[0] == NULL) { //QUESTION: Is it really possible that a node has a leaf but no key?
-				PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-				currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-				bufMgr->readPage(file, node->pageNoArray[0], leafPage);
-				leaf = (LeafNodeDouble *)leafPage;
-				bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-			}
-			else {
-				for (int i = 0; i < length; i++) {
-					if (lowValDouble <= node->keyArray[0]) { //NOTE: Changed to <=
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[0]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[0], leafPage);
-						leaf = (LeafNodeDouble*)leafPage;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-					else if (lowValDouble > node->keyArray[i] && i != length && lowValDouble <= node->keyArray[i + 1]) { //NOTE: Changed to <=
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
-						leaf = (LeafNodeDouble*)leafPage;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-					else if (lowValDouble > node->keyArray[i] && (i == length || node->keyArray[i + 1] == NULL)) { //TODO/QUESTION: Should we not have (i == length || i = INTARRAYNONLEAFSIZE) instead? Is length = INTARRAYNONLEAFSIZE or is it equal to the number of keys actually present?
-						PageId lastPageNum = currentPageNum; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						currentPageNum = node->pageNoArray[i + 1]; // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						bufMgr->readPage(file, node->pageNoArray[i + 1], leafPage);
-						leaf = (LeafNodeDouble*)leafPage;
-						bufMgr->unPinPage(file, lastPageNum, false); // TODO/QUESTION: Related to unpinPage. Please check if you agree.
-						break;
-					}
-				}
-			}
-
-			//Leaf now points to the page where the first recordID may be found
-			//Looping through the keys in the current leaf
-			nextEntry = 0;
-			//////// FILL IN THE BLANKS ///////////////
 			break;
-
-		case Datatype::STRING: 
-			//Initializing to empty string
-			//Dereferencing by casting void* to char*
-			//Using first 10 chars of the char array for string comparison
-			lowValString.clear(); 
-			for (int i = 0; i < 10; i++){
-				lowValString += *((char*)lowValParm + i); 
-			}
-			highValString.clear(); 
-			for (int i = 0; i < 10; i++){
-				highValString += *((char*)highValParm + i);
-			}
-			// Method throws exception if lower bound > upper bound
-			if (lowValString > highValString){
-				throw BadScanrangeException();
-			}
-			// Starting scan since the range and operators are valid
-			scanExecuting = true;
-			// Finding the leaf page with the first RecordID satisfying scan parameters
-			
-			//////// FILL IN THE BLANKS ///////////////
-			break;
-
-		default: break;
-	}	
-		
-	
-
-}
-
-// -----------------------------------------------------------------------------
-// BTreeIndex::scanNext
-// -----------------------------------------------------------------------------
-
-const void BTreeIndex::scanNext(RecordId& outRid) 
-{
-
-}
-
-// -----------------------------------------------------------------------------
-// BTreeIndex::endScan
-// -----------------------------------------------------------------------------
-//
-const void BTreeIndex::endScan() 
-{
-	// Method terminates the current scan and  throws a ScanNotInitializedException if invoked before a succesful startScan call
-	if(!scanExecuting){
-		throw ScanNotInitializedException();
+		}
+		default: { break; }
 	}
-	else
-	{
-		scanExecuting = false;
-	}
-
-	// Unpinning all the pages that have been pinned for the purpose of scan
-	try {
-		bufMgr->unPinPage(file, currentPageNum, false);
-	} catch(const PageNotPinnedException &e) {
-		std::cout << "PageNotPinned thrown in endScan()\n";
-	}
-	// TODO: Should the dirty bit be set to false irrespective of whether the page is actually dirty or not?
-	// TODO: Check if the currentPage is the only page pinned for the purpose of the scan 
 }
-
 }
