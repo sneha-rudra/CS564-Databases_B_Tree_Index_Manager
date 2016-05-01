@@ -317,6 +317,11 @@ class BTreeIndex {
 	PageId	rootPageNum;
 
   /**
+  * Page pointer to rootPage. Only page to be kept in buffer from constructor to destructor
+  */
+	Page* rootPage;
+
+  /**
    * Datatype of attribute over which index is built.
    */
 	Datatype	attributeType;
@@ -491,6 +496,8 @@ class BTreeIndex {
 	const void restructure(Page* fullPage, bool isLeaf, const void* keyPtr, PageId newPageIdFromChild, PageId &newPageId);
 
 	const void traverse(Page* page, int pageLevel, const void* keyPtr, PageId &leafId);
+
+    const void printPage(Page* page, bool isLeaf);
 };
 
 }
