@@ -368,21 +368,48 @@ const void BTreeIndex::insertEntry(const void *key, const RecordId rid)
 					insertIntoNonLeafPage(rootPage, (void*) &middleInt, newPageId);
 
 				} else {
-					/*
-					restructure(rootPage, false, middleKey, newPageId, newPageId);
-					//only need to insert if 
-					if(*((int*) middleKeyFromChild) < *((int*) middleKey)) {
-						//insert it onto old node (nodeInt)
-						insertIntoNonLeafPage(page, middleKeyFromChild, pageIdFromChild);
-					} else if(*((int*) middleKeyFromChild) > *((int*) middleKey)) {
-						//insert it onto the new node the child created
-						//read in that page
-						Page* newNodePage;
-						bufMgr->readPage(file, newPageId, newNodePage);
-						insertIntoNonLeafPage(newNodePage, middleKeyFromChild, pageIdFromChild);
-						//TODO: unpin that page
+					PageId addedPageId;
+					restructure(rootPage, false, (void*) &middleInt, newPageId, addedPageId);
+
+					//create a new NonLeafPage and put the middle int on it
+					Page* newRootPage;
+					PageId newRootPageId = 0;
+					bufMgr->allocPage(file, newRootPageId, newRootPage);
+					NonLeafNodeInt* newRoot = (NonLeafNodeInt*) newRootPage;
+
+					//we know this can never be just above the leaves so set level to 0
+					newRoot->level = 0;
+
+					//null eveything in this new page
+					newRoot->pageNoArray[nodeOccupancy] = NULL;
+					for(int i = 0; i < nodeOccupancy; i++) {
+						newRoot->keyArray[i] = INT_MAX;
+						newRoot->pageNoArray[i] = NULL;
 					}
-					*/
+
+					//the only value in the new root is the middle value passed up from the child
+					newRoot->keyArray[0] = middleInt;
+
+					//the left child is the old root page
+					newRoot->pageNoArray[0] = rootPageNum;
+					//the right child is the one that was added by the restructure method
+					newRoot->pageNoArray[1] = addedPageId;
+
+					//unpin the old root page and update the class references
+					bufMgr->unPinPage(file, rootPageNum, true);
+					rootPageNum = newRootPageId;
+					rootPage = newRootPage;
+
+                    			//update the meta info
+                    			//read in the metainfo so it can be updated
+                    			Page* metadataPage;
+                    			bufMgr->readPage(file, headerPageNum, metadataPage);
+                    			IndexMetaInfo* metadata = (IndexMetaInfo*) metadataPage;
+
+                    			metadata->rootPageNo = newRootPageId;
+
+                    			//unpin the metadataPage
+                			bufMgr->unPinPage(file, headerPageNum, true);
 					
 				}
 			}
